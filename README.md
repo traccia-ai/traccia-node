@@ -41,10 +41,10 @@ npm install @traccia/sdk
 Initialize the SDK and trace your application functions using decorators.
 
 ```typescript
-import { startTracing, observe } from '@traccia/sdk';
+import { Traccia, observe } from '@traccia/sdk';
 
 // Initialize (auto-loads from traccia.toml or env vars if present)
-await startTracing();
+await Traccia.init();
 
 // Trace any function
 class Service {
@@ -63,11 +63,11 @@ await service.doWork('hello');
 Seamlessly integrate with LangChain to automatically track model usage, tokens, and latency.
 
 ```typescript
-import { startTracing, observe } from '@traccia/sdk';
+import { Traccia, observe } from '@traccia/sdk';
 import { ChatOpenAI } from '@langchain/openai';
 import { TracciaCallbackHandler } from '@traccia/sdk/integrations';
 
-await startTracing();
+await Traccia.init();
 
 const model = new ChatOpenAI({
   modelName: 'gpt-4',

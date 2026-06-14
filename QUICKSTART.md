@@ -13,11 +13,11 @@ npm install @traccia/sdk
 Add this to your application's entry point (e.g., `index.ts` or `app.ts`):
 
 ```typescript
-import { startTracing } from '@traccia/sdk';
+import { Traccia } from '@traccia/sdk';
 
 // Initialize tracing (defaults to OTLP export at http://localhost:4318/v1/traces)
 // This will automatically load configuration from traccia.toml or environment variables
-await startTracing();
+await Traccia.init();
 ```
 
 ## 2. Instrument Functions

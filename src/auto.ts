@@ -58,7 +58,7 @@ export function getTracer(name: string, version?: string): ITracer {
 /**
  * Initialize tracing with automatic setup.
  */
-export async function startTracing(config: SDKConfig = {}): Promise<TracerProvider> {
+export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   if (started) {
     return getTracerProvider();
   }
@@ -214,6 +214,11 @@ function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcess
   process.on('SIGINT', shutdown);
   _registeredShutdown = true;
 }
+
+/**
+ * Alias for backwards compatibility.
+ */
+export const startTracing = init;
 
 let _registeredShutdown = false;
 

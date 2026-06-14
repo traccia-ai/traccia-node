@@ -6,6 +6,7 @@ export {
   getTracer,
   getTracerProvider,
   setTracerProvider,
+  init,
   startTracing,
   stopTracing,
   runWithAutoTrace,
@@ -160,4 +161,22 @@ export type { TracingMiddlewareOptions, FastifyTracingOptions } from './instrume
 
 // Integrations
 export { installOpenAIAgents, installCrewai } from './integrations';
+
+// Unified Namespace for convenience (matches Python SDK)
+import { init } from './auto';
+import { getTracer } from './auto';
+import { observe } from './instrumentation/decorator';
+import { setSessionId, setUserId, setTenantId, setProjectId } from './config/runtime-config';
+import { getCurrentSpan } from './context/context';
+
+export const Traccia = {
+  init,
+  getTracer,
+  observe,
+  setSessionId,
+  setUserId,
+  setTenantId,
+  setProjectId,
+  getCurrentSpan,
+};
 
