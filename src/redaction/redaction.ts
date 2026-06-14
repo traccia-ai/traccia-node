@@ -25,8 +25,8 @@ export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
   "assistant",
 ]);
 
-export function redactString(text: string): string {
-  if (!text) return text;
+export function redactString(text: string | null | undefined): string {
+  if (!text || typeof text !== 'string') return '';
   let result = text;
   result = result.replace(EMAIL, "[REDACTED_EMAIL]");
   result = result.replace(PHONE, "[REDACTED_PHONE]");
