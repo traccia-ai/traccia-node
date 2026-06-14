@@ -29,7 +29,7 @@ export class Span implements ISpan {
     this.provider = provider as TracerProvider;
     this.parentSpanId = parentSpanId;
     this.attributes = attributes ? { ...attributes } : {};
-    this.startTimeNs = Date.now() * 1_000_000;
+    this.startTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
   }
 
   get context(): ISpanContext {
@@ -68,7 +68,7 @@ export class Span implements ISpan {
     if (this.ended) return;
     this.events.push({
       name,
-      timestamp: Date.now() * 1_000_000,
+      timestamp: Math.floor((performance.timeOrigin + performance.now()) * 1_000_000),
       attributes: attributes ? { ...attributes } : {},
     });
     this.otelSpan.addEvent(name, attributes as any);
@@ -94,7 +94,7 @@ export class Span implements ISpan {
   end(): void {
     if (this.ended) return;
     this.ended = true;
-    this.endTimeNs = Date.now() * 1_000_000;
+    this.endTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
     
     // Notify provider of span end
     if (this.provider) {

@@ -12,17 +12,17 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 
 ## Features
 
-- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, LangChain support
-- **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically
-- **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery
-- **Decorator-Based**: Trace any function with `@observe` decorator
-- **Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console (for debugging)
-- **Production-Ready**: Rate limiting, typed errors, config validation, robust flushing
-- **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy
-- **High Performance**: Efficient batching, async support, minimal overhead
-- **W3C Trace Context**: Native distributed tracing header propagation
-- **Governance & Policies**: Lifecycle hooks for pre/post execution checks
-- **Agent Identity**: Centralized configuration mapping to OTel resource attributes
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, LangChain support.
+- **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically.
+- **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery.
+- **Decorator-Based**: Trace any function with the `@observe` decorator.
+- **Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin) and Console exporters.
+- **Production-Ready**: Rate limiting, typed errors, config validation, robust flushing.
+- **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy.
+- **High Performance**: Efficient batching, async support, minimal overhead.
+- **W3C Trace Context**: Native distributed tracing header propagation.
+- **Governance & Policies**: Lifecycle hooks for pre- and post-execution checks.
+- **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
 
 ---
 
@@ -35,6 +35,8 @@ npm install @traccia/sdk
 ```
 
 ### Basic Usage
+
+Initialize the SDK and trace your application functions using decorators.
 
 ```typescript
 import { startTracing, observe } from '@traccia/sdk';
@@ -54,7 +56,9 @@ const service = new Service();
 await service.doWork('hello');
 ```
 
-### With LLM Calls
+### Integration with LLMs (LangChain)
+
+Seamlessly integrate with LangChain to automatically track model usage, tokens, and latency.
 
 ```typescript
 import { startTracing, observe } from '@traccia/sdk';
@@ -65,7 +69,7 @@ await startTracing();
 
 const model = new ChatOpenAI({
   modelName: 'gpt-4',
-  callbacks: [new TracciaCallbackHandler()], // Seamless integration
+  callbacks: [new TracciaCallbackHandler()],
 });
 
 @observe({ type: 'llm' })
@@ -84,288 +88,92 @@ const text = await generateText("Write a haiku about TypeScript");
 
 ### Configuration File
 
-Create a `traccia.toml` file in your project root:
+Create a `traccia.toml` file in your project root using the CLI:
 
 ```bash
 npx traccia-ts config init
 ```
 
-This creates a template config file:
+This creates a template config file with the following structure:
 
 ```toml
 [tracing]
-# API key (optional - for future Traccia UI, not needed for OTLP backends)
-api_key = ""
-
 # Endpoint URL for OTLP trace ingestion
-# Works with Grafana Tempo, Jaeger, Zipkin, and other OTLP-compatible backends
-endpoint = "http://localhost:4318/v1/traces"
+endpoint = "http://localhost:8000/v2/traces"
 
-sample_rate = 1.0           # 0.0 to 1.0
-use_otlp = true             # Use OTLP exporter
+# Flush interval for batching spans (in ms)
+flush_interval = 5000
 
-[exporters]
-# Only enable ONE exporter at a time
-enable_console = false        # Print traces to console
+# Maximum size of span batch before forced flush
+batch_size = 512
 
-[instrumentation]
-enable_token_counting = true    # Count tokens for LLM calls
-enable_costs = true             # Calculate costs
+[agent]
+# Name of the agent emitting traces
+name = "my-typescript-agent"
+
+# Type of the agent (e.g., 'workflow', 'llm', 'retriever')
+type = "workflow"
+
+# Environment (e.g., 'development', 'staging', 'production')
+env = "development"
+
+# Project this agent belongs to
+project = "my-default-project"
+
+[integrations]
+# Enable/disable specific integrations
+langchain = true
+openai = true
 ```
 
 ### Environment Variables
 
-All config parameters can be set via environment variables with the `TRACCIA_` prefix:
+Configuration can also be provided via standard environment variables:
 
--   **Tracing**: `TRACCIA_API_KEY`, `TRACCIA_ENDPOINT`, `TRACCIA_SAMPLE_RATE`
--   **Exporters**: `TRACCIA_ENABLE_CONSOLE`
--   **Instrumentation**: `TRACCIA_ENABLE_TOKEN_COUNTING`, `TRACCIA_ENABLE_COSTS`
-
-**Priority**: Explicit parameters > Environment variables > Config file > Defaults
+- `TRACCIA_API_KEY`: API Key for ingestion authentication.
+- `TRACCIA_ENDPOINT`: The OTLP endpoint (e.g., `http://localhost:8000/v2/traces`).
+- `TRACCIA_AGENT_NAME`: The name of the agent tracing execution.
+- `TRACCIA_ENV`: The environment (e.g., `development`, `production`).
 
 ---
 
-## Usage Guide
+## Advanced Usage
 
-### The `@observe` Decorator
+### Custom Traces and Attributes
 
-The `@observe` decorator is the primary way to instrument your code:
+You can manually trace components and add custom business metrics to spans:
 
 ```typescript
+import { trace } from '@opentelemetry/api';
 import { observe } from '@traccia/sdk';
 
-class DataService {
-  // Basic usage
-  @observe()
-  async processData(data: any) {
-    return transform(data);
-  }
-
-  // Custom span name and attributes
-  @observe({ 
-    name: 'data_pipeline',
-    attributes: { version: '2.0', env: 'prod' }
-  })
-  async processPipeline(data: any) {
-    return transform(data);
-  }
-
-  // Specify span type (llm, tool, span)
-  @observe({ type: 'llm' })
-  async callLLM() {
-    // ...
+class DataPipeline {
+  @observe({ type: 'retriever', name: 'fetch_user_data' })
+  async fetchData(userId: string) {
+    const activeSpan = trace.getActiveSpan();
+    
+    // Add custom business metrics
+    activeSpan?.setAttribute('app.user.id', userId);
+    activeSpan?.setAttribute('db.query.latency', 45);
+    
+    return { id: userId, status: 'active' };
   }
 }
 ```
 
-### Manual Span Creation
+### Stopping the SDK
 
-For more control, create spans manually:
-
-```typescript
-import { getTracer } from '@traccia/sdk';
-
-const tracer = getTracer('my-service');
-
-await tracer.startActiveSpan('manual-operation', async (span) => {
-  try {
-    span.setAttribute('user_id', '123');
-    // ... do work ...
-  } catch (err) {
-    span.recordException(err as Error);
-    throw err;
-  } finally {
-    span.end();
-  }
-});
-```
-
-### Accessing Active Span
-
-You can access the current span within an `@observe` decorated function using `getCurrentSpan`.
+To ensure all queued telemetry data is successfully flushed to the backend before the process exits, invoke `stopTracing()`:
 
 ```typescript
-import { observe, getCurrentSpan } from '@traccia/sdk';
+import { stopTracing } from '@traccia/sdk';
 
-@observe()
-async function sensitiveOperation() {
-  const span = getCurrentSpan();
-  
-  if (span) {
-    span.addEvent('milestone_reached');
-    span.setAttribute('dynamic_flag', true);
-  }
-}
+// Flush buffered spans and shut down the provider safely
+await stopTracing();
 ```
-
----
-
-## Integrations
-
-### LangChain
-
-The SDK provides a `TracciaCallbackHandler` for seamless integration with LangChain.
-
-```typescript
-import { TracciaCallbackHandler } from '@traccia/sdk/integrations';
-import { ChatOpenAI } from '@langchain/openai';
-
-const model = new ChatOpenAI({
-  callbacks: [new TracciaCallbackHandler()],
-});
-```
-
-### LangGraph
-
-For LangGraph, use the `instrumentLangGraph` utility:
-
-```typescript
-import { instrumentLangGraph } from '@traccia/sdk/integrations/langgraph-instrumentation';
-
-const graph = new StateGraph({ ... });
-// ... define graph ...
-
-const instrumentedApp = instrumentLangGraph(app, {
-    traceGraphExecution: true,
-    traceNodeExecution: true,
-});
-```
-
----
-
-## Auto-Instrumentation
-
-### OpenAI / Anthropic
-
-```typescript
-import { patchOpenAI, patchAnthropic } from '@traccia/sdk';
-
-// Patch globally (monkey-patches the SDK)
-patchOpenAI();
-patchAnthropic();
-
-// Or wrap specific calls
-import { wrapOpenAICreate } from '@traccia/sdk';
-const tracedCreate = wrapOpenAICreate(client.chat.completions.create, client);
-```
-
-### HTTP Clients
-
-```typescript
-import { patchAxios, patchFetch, createTracedFetch } from '@traccia/sdk';
-
-// Global patching
-patchAxios();   // Adds interceptors to axios
-patchFetch();   // Patches globalThis.fetch
-
-// Or create traced instances
-const tracedFetch = createTracedFetch();
-```
-
----
-
-## Framework Middleware
-
-### Express
-
-```typescript
-import express from 'express';
-import { expressMiddleware, expressErrorMiddleware } from '@traccia/sdk';
-
-const app = express();
-app.use(expressMiddleware({ ignorePaths: ['/health'] }));
-app.use(expressErrorMiddleware()); // Add after routes
-```
-
-### Fastify
-
-```typescript
-import fastify from 'fastify';
-import { fastifyPlugin } from '@traccia/sdk';
-
-const app = fastify();
-app.register(fastifyPlugin({ ignorePaths: ['/health'] }));
-```
-
----
-
-## Advanced Features
-
-### Agent Enrichment & Identity
-
-You can define a centralized agent identity that maps directly to OpenTelemetry resource attributes.
-
-```typescript
-import { AgentIdentity, AgentEnrichmentProcessor } from '@traccia/sdk';
-
-// Standardized identity mapping
-const identity = new AgentIdentity({
-  id: 'agent-42',
-  name: 'SupportBot',
-  type: 'workflow',
-  env: 'production',
-  project: 'customer-success'
-});
-
-const processor = new AgentEnrichmentProcessor({
-  agentConfigPath: 'agent_config.json', // Still supported
-  defaultEnv: 'production',
-});
-```
-
-### Governance Hooks
-
-Implement lifecycle hooks for dynamic policy enforcement, redaction, or moderation:
-
-```typescript
-import { GovernanceManager } from '@traccia/sdk';
-
-const manager = new GovernanceManager();
-
-manager.registerHooks({
-  onBeforeExecute: (span, schema) => {
-    if (schema.input.includes('PII')) {
-      throw new Error('PII detected in input');
-    }
-  },
-  onAfterExecute: (span, schema, result) => {
-    // Validate output or enrich span
-    span.setAttribute('governance.checked', true);
-  }
-});
-```
-
-### File Exporter
-
-```typescript
-import { FileExporter } from '@traccia/sdk';
-
-const exporter = new FileExporter({
-  filePath: 'traces.jsonl',
-  resetOnStart: true,  // Clear file on first export
-});
-```
-
-### Rate Limiting
-
-```typescript
-import { RateLimitingSpanProcessor } from '@traccia/sdk';
-
-const processor = new RateLimitingSpanProcessor({
-  maxSpansPerSecond: 100,
-  maxBlockMs: 50,
-  nextProcessor: batchProcessor,
-});
-```
-
----
-
-## Contributing
-
-Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ---
 
 ## License
 
-Apache 2.0 - see [LICENSE](LICENSE) for details
+This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
