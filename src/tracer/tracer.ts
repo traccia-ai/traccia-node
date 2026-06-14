@@ -2,21 +2,23 @@
  * Tracer implementation for creating and managing spans.
  */
 
+import { trace, Tracer as OTelTracer, context as otelContext, SpanOptions as OTelSpanOptions, ROOT_CONTEXT } from '@opentelemetry/api';
 import { ITracer, ISpan, ISpanContext } from '../types';
 import { Span } from './span';
-import { SpanContext } from './span-context';
-import { getCurrentSpan, runWithSpanAsync } from '../context/context';
+import { runWithSpanAsync, getCurrentSpan } from '../context/context';
 import { TracerProvider } from './provider';
-import { getConfig } from '../config/runtime-config';
 
 /**
  * Tracer for creating and managing spans.
  */
 export class Tracer implements ITracer {
   private provider: TracerProvider;
+  private otelTracer: OTelTracer;
 
-  constructor(provider: TracerProvider, _instrumentationScope: string) {
+  constructor(provider: TracerProvider, instrumentationScope: string) {
     this.provider = provider;
+    // Get native OTel tracer
+    this.otelTracer = trace.getTracer(instrumentationScope);
   }
 
   /**
@@ -30,45 +32,48 @@ export class Tracer implements ITracer {
       parentContext?: ISpanContext | null;
     }
   ): ISpan {
-    const parentSpan = options?.parent ?? getCurrentSpan();
-    const effectiveContext = options?.parentContext || (parentSpan?.context as ISpanContext);
+    let activeContext = otelContext.active();
 
-    let traceId: string;
-    let parentSpanId: string | undefined;
-    let traceFlags: number;
-
-    if (parentSpan) {
-      traceId = parentSpan.context.traceId;
-      parentSpanId = parentSpan.context.spanId;
-      traceFlags = parentSpan.context.traceFlags;
-    } else if (effectiveContext && effectiveContext.traceId) {
-      traceId = effectiveContext.traceId;
-      parentSpanId = effectiveContext.spanId;
-      traceFlags = effectiveContext.traceFlags || 1;
-      console.log(`🔗 TRACCIA PATCH: Continuing trace from parent context: TraceId:${traceId} -> parentSpanId:${parentSpanId}`);
+    if (options?.parentContext) {
+      // Create a remote span context and set it as active
+      activeContext = trace.setSpanContext(activeContext, {
+        traceId: options.parentContext.traceId,
+        spanId: options.parentContext.spanId,
+        traceFlags: options.parentContext.traceFlags || 1,
+        isRemote: true
+      });
+      console.log(`🔗 TRACCIA PATCH: Continuing trace from parent context: TraceId:${options.parentContext.traceId} -> parentSpanId:${options.parentContext.spanId}`);
+    } else if (options?.parent) {
+      activeContext = trace.setSpanContext(activeContext, {
+        traceId: options.parent.context.traceId,
+        spanId: options.parent.context.spanId,
+        traceFlags: options.parent.context.traceFlags || 1,
+        isRemote: false
+      });
+    } else if (options?.parent === null) {
+      // Explicitly detach from current active span context
+      activeContext = ROOT_CONTEXT;
     } else {
-      traceId = this.provider.generateTraceId();
-      parentSpanId = undefined;
-
-      const sampler = this.provider.getSampler();
-      const sampled = sampler ? sampler.shouldSample().sampled : true;
-      traceFlags = sampled ? 1 : 0;
-
-      // Debug override: force sampling for new root traces
-      const config = getConfig();
-      if (config.debug) {
-        traceFlags = 1;
+      // Automatically pull parent from Traccia context if available
+      const currentSpan = getCurrentSpan();
+      if (currentSpan) {
+        activeContext = trace.setSpanContext(activeContext, {
+          traceId: currentSpan.context.traceId,
+          spanId: currentSpan.context.spanId,
+          traceFlags: currentSpan.context.traceFlags || 1,
+          isRemote: false
+        });
       }
     }
 
-    const spanContext = new SpanContext(
-      traceId,
-      this.provider.generateSpanId(),
-      traceFlags,
-      effectiveContext?.traceState
-    );
+    const otelOptions: OTelSpanOptions = {
+      attributes: options?.attributes as any,
+    };
 
-    return new Span(name, this, spanContext, parentSpanId, options?.attributes, this.provider);
+    const otelSpan = this.otelTracer.startSpan(name, otelOptions, activeContext);
+    const parentSpanId = trace.getSpanContext(activeContext)?.spanId;
+
+    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes);
   }
 
   /**

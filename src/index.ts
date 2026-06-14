@@ -18,7 +18,6 @@ export {
   TracerProvider,
   Tracer,
   Span,
-  SpanContext,
 } from './tracer';
 
 export {

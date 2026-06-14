@@ -3,16 +3,15 @@
  */
 
 import { ISpan, ISpanProcessor } from '../types';
-import { PricingTable, DEFAULT_PRICING } from '../config/pricing-config';
-
-// Cached pricing table for computeCost
-let cachedPricing: PricingTable | null = null;
+import { PricingTable } from '../config/pricing-config';
+import { getResolver } from './cost-resolver';
 
 /**
  * Set the cached pricing table (used during initialization).
+ * @deprecated Use getResolver().update(pricing) instead.
  */
 export function setCachedPricing(pricing: PricingTable): void {
-  cachedPricing = pricing;
+  getResolver().update(pricing);
 }
 
 /**
@@ -28,33 +27,17 @@ export function computeCost(
   promptTokens: number,
   completionTokens: number
 ): number | undefined {
-  // Use cached pricing or fall back to default
-  const pricingTable = cachedPricing || DEFAULT_PRICING;
-
-  const pricing = pricingTable[model];
-  if (!pricing) {
-    return undefined;
-  }
-
-  let cost = 0;
-  if (promptTokens) {
-    cost += (promptTokens / 1000) * pricing.inputCost;
-  }
-  if (completionTokens) {
-    cost += (completionTokens / 1000) * pricing.outputCost;
-  }
-
-  return cost > 0 ? cost : undefined;
+  return getResolver().compute(model, promptTokens, completionTokens);
 }
 
 /**
  * Cost annotation processor.
  */
 export class CostAnnotatingProcessor implements ISpanProcessor {
-  private pricingTable: PricingTable;
-
-  constructor(pricingTable: PricingTable) {
-    this.pricingTable = pricingTable;
+  constructor(initialPricingTable?: PricingTable) {
+    if (initialPricingTable) {
+      getResolver().update(initialPricingTable);
+    }
   }
 
   onEnd(span: ISpan): void {
@@ -64,23 +47,16 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
         return;
       }
 
-      const pricing = this.pricingTable[model];
-      if (!pricing) {
-        return;
-      }
-
       const inputTokens = span.attributes['input_tokens'] as number | undefined;
       const outputTokens = span.attributes['output_tokens'] as number | undefined;
 
-      let cost = 0;
-      if (inputTokens) {
-        cost += (inputTokens / 1000) * pricing.inputCost;
-      }
-      if (outputTokens) {
-        cost += (outputTokens / 1000) * pricing.outputCost;
-      }
+      const cost = getResolver().compute(
+        model,
+        inputTokens || 0,
+        outputTokens || 0
+      );
 
-      if (cost > 0) {
+      if (cost && cost > 0) {
         // Direct attribute modification for processors (after span ends)
         span.attributes['cost_usd'] = cost;
       }

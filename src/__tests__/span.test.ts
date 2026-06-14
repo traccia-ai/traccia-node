@@ -2,35 +2,9 @@
  * Tests for span and span context.
  */
 
-import { SpanContext } from '../tracer/span-context';
 import { TracerProvider } from '../tracer/provider';
 import { SpanStatus } from '../types';
 
-describe('SpanContext', () => {
-  it('should create a valid span context', () => {
-    const ctx = new SpanContext('trace123', 'span456', 1, 'state=value');
-    expect(ctx.traceId).toBe('trace123');
-    expect(ctx.spanId).toBe('span456');
-    expect(ctx.traceFlags).toBe(1);
-    expect(ctx.traceState).toBe('state=value');
-  });
-
-  it('should validate context', () => {
-    const valid = new SpanContext('a'.repeat(32), 'b'.repeat(16));
-    expect(valid.isValid()).toBe(true);
-
-    const invalid = new SpanContext('0'.repeat(32), 'b'.repeat(16));
-    expect(invalid.isValid()).toBe(false);
-  });
-
-  it('should determine if sampled', () => {
-    const sampled = new SpanContext('trace', 'span', 1);
-    expect(sampled.isSampled()).toBe(true);
-
-    const notSampled = new SpanContext('trace', 'span', 0);
-    expect(notSampled.isSampled()).toBe(false);
-  });
-});
 
 describe('Span', () => {
   let provider: TracerProvider;

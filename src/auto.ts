@@ -3,6 +3,8 @@
  */
 
 import { TracerProvider } from './tracer/provider';
+import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
+import { trace } from '@opentelemetry/api';
 import { BatchSpanProcessor } from './processor/batch-processor';
 import { Sampler } from './processor/sampler';
 import { TokenCountingProcessor } from './processor/token-counter';
@@ -62,6 +64,9 @@ export async function startTracing(config: SDKConfig = {}): Promise<TracerProvid
   }
 
   started = true;
+
+  const basicProvider = new BasicTracerProvider();
+  trace.setGlobalTracerProvider(basicProvider);
 
   // Load environment
   if (config.loadEnv !== false) {
@@ -141,7 +146,7 @@ export async function startTracing(config: SDKConfig = {}): Promise<TracerProvid
     provider.addSpanProcessor(new CostAnnotatingProcessor(pricing));
   }
 
-if (config.enableSpanLogging || loadedConfig.logging.enable_span_logging) {
+  if (config.enableSpanLogging || loadedConfig.logging.enable_span_logging) {
     provider.addSpanProcessor(new LoggingSpanProcessor());
   }
 

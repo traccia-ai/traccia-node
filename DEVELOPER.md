@@ -7,16 +7,22 @@ This guide is for developers working on the Traccia SDK for TypeScript.
 ```
 src/
 ├── types.ts                 # Core type definitions and interfaces
+├── errors.ts                # Standardized exception hierarchy
+├── identity.ts              # AgentIdentity model for OTel resource attributes
 ├── index.ts                # Main SDK exports
 ├── auto.ts                 # SDK initialization and global tracer setup
 ├── tracer/
 │   ├── index.ts           # Tracer module exports
-│   ├── span.ts            # Span implementation
-│   ├── span-context.ts    # SpanContext implementation
-│   ├── tracer.ts          # Tracer implementation
+│   ├── span.ts            # Span implementation (wraps @opentelemetry/api)
+│   ├── tracer.ts          # Tracer implementation (wraps @opentelemetry/api)
 │   └── provider.ts        # TracerProvider implementation
 ├── context/
-│   └── context.ts         # AsyncLocalStorage-based context management
+│   ├── context.ts         # AsyncLocalStorage-based context management
+│   └── propagators.ts     # W3C Trace Context propagation
+├── governance/
+│   └── hooks.ts           # Lifecycle governance hooks
+├── metrics/
+│   └── recorder.ts        # Metrics recording abstraction
 ├── config/
 │   ├── runtime-config.ts  # Runtime configuration state
 │   ├── env-config.ts      # Environment variable loading
@@ -44,11 +50,13 @@ src/
 ### Core Concepts
 
 1. **Tracer Provider**: Manages tracers and processors
-2. **Tracer**: Creates and manages spans
-3. **Span**: Represents a unit of work
-4. **Span Context**: Carries trace/span IDs across boundaries
+2. **Tracer**: Wraps `@opentelemetry/api` Tracer for native trace management
+3. **Span**: Wraps `@opentelemetry/api` Span implementation
+4. **Context Management**: W3C Trace Context and standard OTel context propagation
 5. **Span Processor**: Processes spans at lifecycle events
 6. **Span Exporter**: Sends spans to backends
+7. **Cost Resolver**: Singleton pattern for dynamic model pricing lookups
+8. **Governance Hooks**: Lifecycle interception for policy enforcement
 
 ### Flow
 

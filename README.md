@@ -1,23 +1,32 @@
 # Traccia SDK for Javascript/TypeScript
 
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![NPM Version](https://img.shields.io/npm/v/@traccia/sdk.svg?style=flat-square)](https://www.npmjs.com/package/@traccia/sdk)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
+
 **Production-ready distributed tracing for AI agents and LLM applications**
 
 Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observability and tracing of AI agents, LLM applications, and complex distributed systems. Built on OpenTelemetry standards with specialized instrumentation for AI workloads.
 
-## ✨ Features
+---
 
-- **🔍 Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, LangChain support
-- **📊 LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically
-- **⚡ Zero-Config Start**: Simple `startTracing()` call with automatic config discovery
-- **🎯 Decorator-Based**: Trace any function with `@observe` decorator
-- **🔧 Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console (for debugging)
-- **🛡️ Production-Ready**: Rate limiting, error handling, config validation, robust flushing
-- **📝 Type-Safe**: Full TypeScript support
-- **🚀 High Performance**: Efficient batching, async support, minimal overhead
+## Features
+
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, LangChain support
+- **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically
+- **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery
+- **Decorator-Based**: Trace any function with `@observe` decorator
+- **Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console (for debugging)
+- **Production-Ready**: Rate limiting, typed errors, config validation, robust flushing
+- **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy
+- **High Performance**: Efficient batching, async support, minimal overhead
+- **W3C Trace Context**: Native distributed tracing header propagation
+- **Governance & Policies**: Lifecycle hooks for pre/post execution checks
+- **Agent Identity**: Centralized configuration mapping to OTel resource attributes
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -71,7 +80,7 @@ const text = await generateText("Write a haiku about TypeScript");
 
 ---
 
-## 📖 Configuration
+## Configuration
 
 ### Configuration File
 
@@ -116,7 +125,7 @@ All config parameters can be set via environment variables with the `TRACCIA_` p
 
 ---
 
-## 🎯 Usage Guide
+## Usage Guide
 
 ### The `@observe` Decorator
 
@@ -191,7 +200,7 @@ async function sensitiveOperation() {
 
 ---
 
-## 🔧 Integrations
+## Integrations
 
 ### LangChain
 
@@ -224,7 +233,7 @@ const instrumentedApp = instrumentLangGraph(app, {
 
 ---
 
-## 🔌 Auto-Instrumentation
+## Auto-Instrumentation
 
 ### OpenAI / Anthropic
 
@@ -255,7 +264,7 @@ const tracedFetch = createTracedFetch();
 
 ---
 
-## 🌐 Framework Middleware
+## Framework Middleware
 
 ### Express
 
@@ -280,7 +289,51 @@ app.register(fastifyPlugin({ ignorePaths: ['/health'] }));
 
 ---
 
-## ⚙️ Advanced Features
+## Advanced Features
+
+### Agent Enrichment & Identity
+
+You can define a centralized agent identity that maps directly to OpenTelemetry resource attributes.
+
+```typescript
+import { AgentIdentity, AgentEnrichmentProcessor } from '@traccia/sdk';
+
+// Standardized identity mapping
+const identity = new AgentIdentity({
+  id: 'agent-42',
+  name: 'SupportBot',
+  type: 'workflow',
+  env: 'production',
+  project: 'customer-success'
+});
+
+const processor = new AgentEnrichmentProcessor({
+  agentConfigPath: 'agent_config.json', // Still supported
+  defaultEnv: 'production',
+});
+```
+
+### Governance Hooks
+
+Implement lifecycle hooks for dynamic policy enforcement, redaction, or moderation:
+
+```typescript
+import { GovernanceManager } from '@traccia/sdk';
+
+const manager = new GovernanceManager();
+
+manager.registerHooks({
+  onBeforeExecute: (span, schema) => {
+    if (schema.input.includes('PII')) {
+      throw new Error('PII detected in input');
+    }
+  },
+  onAfterExecute: (span, schema, result) => {
+    // Validate output or enrich span
+    span.setAttribute('governance.checked', true);
+  }
+});
+```
 
 ### File Exporter
 
@@ -305,25 +358,14 @@ const processor = new RateLimitingSpanProcessor({
 });
 ```
 
-### Agent Enrichment
-
-```typescript
-import { AgentEnrichmentProcessor } from '@traccia/sdk';
-
-const processor = new AgentEnrichmentProcessor({
-  agentConfigPath: 'agent_config.json',
-  defaultEnv: 'production',
-});
-```
-
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
 ---
 
-## 📄 License
+## License
 
 Apache 2.0 - see [LICENSE](LICENSE) for details

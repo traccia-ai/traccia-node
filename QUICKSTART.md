@@ -76,6 +76,23 @@ TRACCIA_SAMPLE_RATE=1.0
 TRACCIA_ENABLE_CONSOLE=true
 ```
 
+### Identity Configuration
+
+Define your agent's identity using the `AgentIdentity` model to automatically tag all emitted traces with canonical resource attributes:
+
+```typescript
+import { AgentIdentity } from '@traccia/sdk';
+
+const identity = new AgentIdentity({
+  id: 'my-agent-id',
+  name: 'My Cool Agent',
+  type: 'assistant',
+  env: 'production'
+});
+
+// Pass this configuration when initializing your processors or tracer provider
+```
+
 ## 5. Integrations
 
 ### LangChain

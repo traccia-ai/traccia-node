@@ -9,24 +9,44 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
     },
     "./auto": {
-      "import": "./dist/auto.js",
-      "require": "./dist/auto.js",
-      "types": "./dist/auto.d.ts"
+      "import": {
+        "types": "./dist/auto.d.mts",
+        "default": "./dist/auto.mjs"
+      },
+      "require": {
+        "types": "./dist/auto.d.ts",
+        "default": "./dist/auto.js"
+      }
     },
     "./tracer": {
-      "import": "./dist/tracer/index.js",
-      "require": "./dist/tracer/index.js",
-      "types": "./dist/tracer/index.d.ts"
+      "import": {
+        "types": "./dist/tracer/index.d.mts",
+        "default": "./dist/tracer/index.mjs"
+      },
+      "require": {
+        "types": "./dist/tracer/index.d.ts",
+        "default": "./dist/tracer/index.js"
+      }
     },
     "./integrations": {
-      "import": "./dist/integrations/index.js",
-      "require": "./dist/integrations/index.js",
-      "types": "./dist/integrations/index.d.ts"
+      "import": {
+        "types": "./dist/integrations/index.d.mts",
+        "default": "./dist/integrations/index.mjs"
+      },
+      "require": {
+        "types": "./dist/integrations/index.d.ts",
+        "default": "./dist/integrations/index.js"
+      }
     }
   },
   "files": [
@@ -39,6 +59,7 @@
     "tracing",
     "observability",
     "agent",
+    "governance",
     "instrumentation",
     "opentelemetry"
   ],
@@ -56,8 +77,8 @@
     "node": ">=16.0.0"
   },
   "scripts": {
-    "build": "tsc",
-    "build:watch": "tsc --watch",
+    "build": "tsup",
+    "build:watch": "tsup --watch",
     "clean": "rimraf dist",
     "prebuild": "npm run clean",
     "lint": "eslint src --ext .ts",
@@ -71,6 +92,7 @@
   },
   "devDependencies": {
     "@langchain/core": ">=0.3.8",
+    "@opentelemetry/api": "^1.9.0",
     "@types/jest": "^29.5.11",
     "@types/node": "^20.10.6",
     "@typescript-eslint/eslint-plugin": "^6.17.0",
@@ -81,6 +103,7 @@
     "rimraf": "^5.0.7",
     "toml": "^3.0.0",
     "ts-jest": "^29.1.1",
+    "tsup": "^8.5.1",
     "typescript": "^5.3.3"
   },
   "publishConfig": {
