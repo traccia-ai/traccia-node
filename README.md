@@ -3,6 +3,8 @@
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![NPM Version](https://img.shields.io/npm/v/@traccia/sdk.svg?style=flat-square)](https://www.npmjs.com/package/@traccia/sdk)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
+[![Socket Badge](https://badge.socket.dev/npm/package/@traccia/sdk/0.1.0)](https://badge.socket.dev/npm/package/@traccia/sdk/0.1.0)
+[![Snyk](https://img.shields.io/badge/Snyk-0%20Vulnerabilities-success?style=flat-square&logo=snyk)](https://security.snyk.io/package/npm/%40traccia%2Fsdk)
 
 **Production-ready distributed tracing for AI agents and LLM applications**
 
