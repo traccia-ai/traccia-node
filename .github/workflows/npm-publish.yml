@@ -37,6 +37,13 @@ jobs:
           git push
           git push --tags
 
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create v${{ inputs.version }} --generate-notes
+
       - name: Install Dependencies
         run: npm ci
 
