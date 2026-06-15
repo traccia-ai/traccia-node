@@ -124,6 +124,8 @@
     "zod": "^4.4.3"
   },
   "overrides": {
-    "protobufjs": "^8.0.2"
+    "protobufjs": "^8.0.2",
+    "esbuild": "^0.28.1",
+    "minimatch": "^9.0.9"
   }
 }
