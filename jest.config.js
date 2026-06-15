@@ -18,4 +18,8 @@ module.exports = {
       statements: 75,
     },
   },
+  reporters: [
+    'default',
+    ['jest-ctrf-json-reporter', {}],
+  ],
 };
