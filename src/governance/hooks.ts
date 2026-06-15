@@ -1,73 +1,64 @@
 /**
- * Governance lifecycle hooks.
+ * Governance hooks framework.
  */
 
 import { ISpan } from '../types';
 
-export interface GovernanceHooks {
-  /**
-   * Called before execution.
-   */
-  onBeforeExecute?: (span: ISpan, schema: Record<string, unknown>) => void;
-
-  /**
-   * Called after execution.
-   */
-  onAfterExecute?: (span: ISpan, schema: Record<string, unknown>, result: unknown) => void;
-
-  /**
-   * Called when a policy violation occurs.
-   */
-  onPolicyViolation?: (span: ISpan, violation: Error) => void;
+export interface GovernanceHook {
+  onBeforeExecute?(span: ISpan, schema?: any): void | Promise<void>;
+  onAfterExecute?(span: ISpan, schema?: any, result?: any): void | Promise<void>;
+  onPolicyViolation?(span: ISpan, error: Error): void | Promise<void>;
 }
 
+/**
+ * Registry for governance hooks.
+ */
 export class GovernanceManager {
-  private hooks: GovernanceHooks[];
+  private hooks: GovernanceHook[] = [];
 
-  constructor() {
-    this.hooks = [];
+  public registerHooks(hook: GovernanceHook): void {
+    this.hooks.push(hook);
   }
 
-  public registerHooks(hooks: GovernanceHooks): void {
-    this.hooks.push(hooks);
+  public getHooks(): GovernanceHook[] {
+    return this.hooks;
   }
 
-  public triggerBeforeExecute(span: ISpan, schema: Record<string, unknown>): void {
+  public triggerBeforeExecute(span: ISpan, schema?: any): void {
     for (const hook of this.hooks) {
       if (hook.onBeforeExecute) {
         try {
-          hook.onBeforeExecute(span, schema);
+          void hook.onBeforeExecute(span, schema);
         } catch (e) {
-          console.error('Error in onBeforeExecute hook', e);
+          // Swallow exceptions
         }
       }
     }
   }
 
-  public triggerAfterExecute(span: ISpan, schema: Record<string, unknown>, result: unknown): void {
+  public triggerAfterExecute(span: ISpan, schema?: any, result?: any): void {
     for (const hook of this.hooks) {
       if (hook.onAfterExecute) {
         try {
-          hook.onAfterExecute(span, schema, result);
+          void hook.onAfterExecute(span, schema, result);
         } catch (e) {
-          console.error('Error in onAfterExecute hook', e);
+          // Swallow exceptions
         }
       }
     }
   }
 
-  public triggerPolicyViolation(span: ISpan, violation: Error): void {
+  public triggerPolicyViolation(span: ISpan, error: Error): void {
     for (const hook of this.hooks) {
       if (hook.onPolicyViolation) {
         try {
-          hook.onPolicyViolation(span, violation);
+          void hook.onPolicyViolation(span, error);
         } catch (e) {
-          console.error('Error in onPolicyViolation hook', e);
+          // Swallow exceptions
         }
       }
     }
   }
 }
 
-// Global governance manager
-export const globalGovernanceManager = new GovernanceManager();
+export const governanceHooks = new GovernanceManager();

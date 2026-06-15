@@ -5,6 +5,7 @@
  * any boilerplate code.
  */
 
+import { InstrumentationError } from '../errors';
 import {
   instrumentLangGraph,
   createTracedNode,
@@ -132,7 +133,7 @@ export async function createSimpleTracedGraph(options: {
     return wrapGraphWithTracing(graph);
   } catch (error) {
     const err = error as Error;
-    throw new Error(
+    throw new InstrumentationError(
       `Failed to create simple traced graph: ${err.message}. Make sure @langchain/langgraph is installed.`
     );
   }
@@ -243,6 +244,6 @@ export async function createAgentWorkflow(options: {
     });
   } catch (error) {
     const err = error as Error;
-    throw new Error(`Failed to create agent workflow: ${err.message}`);
+    throw new InstrumentationError(`Failed to create agent workflow: ${err.message}`);
   }
 }

@@ -7,6 +7,7 @@ import { TokenCountingProcessor } from '../processor/token-counter';
 import { CostAnnotatingProcessor } from '../processor/cost-processor';
 import { LoggingSpanProcessor } from '../processor/logging-processor';
 import { TracerProvider } from '../tracer/provider';
+import { AgentEnrichmentProcessor } from '../processor/agent-enricher';
 
 describe('Sampler', () => {
   it('should reject invalid sample rates', () => {
@@ -85,5 +86,22 @@ describe('LoggingSpanProcessor', () => {
 
     span.end();
     expect(() => processor.onEnd(span)).not.toThrow();
+  });
+});
+
+describe('AgentEnrichmentProcessor', () => {
+  it('should skip agent enrichment when serviceRole is orchestrator', () => {
+    const processor = new AgentEnrichmentProcessor({ serviceRole: 'orchestrator' });
+    const provider = new TracerProvider();
+    const tracer = provider.getTracer('test');
+    
+    const rootSpan = tracer.startSpan('workflow_start');
+    processor.onStart(rootSpan);
+
+    const childSpan = tracer.startSpan('agent_task');
+    // Ensure the processor skips it
+    processor.onStart(childSpan);
+    
+    expect(childSpan.attributes['agent.id']).toBeUndefined();
   });
 });
