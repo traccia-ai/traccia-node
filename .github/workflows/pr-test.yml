@@ -10,6 +10,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -26,12 +28,13 @@ jobs:
         run: npm run build
 
       - name: Test
-        run: npm run test
+        run: npm run test:cov
 
       - name: Publish CTRF Test Summary Results
         uses: ctrf-io/github-test-reporter@v1
         with:
           report-path: './ctrf/ctrf-report.json'
+          pull-request-report: true
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
