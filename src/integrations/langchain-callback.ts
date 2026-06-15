@@ -526,15 +526,15 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
       const usageDetails: Record<string, any> = {
         input:
           llmUsage?.input_tokens ??
-          ("promptTokens" in llmUsage ? llmUsage?.promptTokens : undefined),
+          (llmUsage && "promptTokens" in llmUsage ? llmUsage?.promptTokens : undefined),
         output:
           llmUsage?.output_tokens ??
-          ("completionTokens" in llmUsage
+          (llmUsage && "completionTokens" in llmUsage
             ? llmUsage?.completionTokens
             : undefined),
         total:
           llmUsage?.total_tokens ??
-          ("totalTokens" in llmUsage ? llmUsage?.totalTokens : undefined),
+          (llmUsage && "totalTokens" in llmUsage ? llmUsage?.totalTokens : undefined),
       };
 
       if (llmUsage && "input_token_details" in llmUsage) {

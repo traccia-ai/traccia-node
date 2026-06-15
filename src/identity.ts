@@ -2,6 +2,9 @@
  * Canonical agent identity model for Traccia SDK.
  */
 
+import { z } from 'zod';
+import { ValidationError } from './errors';
+
 export type AgentType = 'workflow' | 'service' | 'tool';
 
 export interface IAgentIdentity {
@@ -15,7 +18,18 @@ export interface IAgentIdentity {
   env?: string;
   /** Project or namespace */
   project?: string;
+  /** Service role (e.g. agent or orchestrator) */
+  serviceRole?: 'agent' | 'orchestrator';
 }
+
+const AgentIdentitySchema = z.object({
+  id: z.string().optional(),
+  name: z.string().optional(),
+  type: z.enum(['workflow', 'service', 'tool']).optional(),
+  env: z.string().optional(),
+  project: z.string().optional(),
+  serviceRole: z.enum(['agent', 'orchestrator']).optional(),
+});
 
 export class AgentIdentity implements IAgentIdentity {
   public id?: string;
@@ -23,13 +37,21 @@ export class AgentIdentity implements IAgentIdentity {
   public type: AgentType;
   public env?: string;
   public project?: string;
+  public serviceRole?: 'agent' | 'orchestrator';
 
   constructor(options: IAgentIdentity = {}) {
-    this.id = options.id;
-    this.name = options.name;
-    this.type = options.type || 'workflow';
-    this.env = options.env;
-    this.project = options.project;
+    const result = AgentIdentitySchema.safeParse(options);
+    if (!result.success) {
+      throw new ValidationError(`Invalid AgentIdentity configuration: ${result.error.message}`, { issues: result.error.issues });
+    }
+
+    const validOptions = result.data;
+    this.id = validOptions.id;
+    this.name = validOptions.name;
+    this.type = validOptions.type || 'workflow';
+    this.env = validOptions.env;
+    this.project = validOptions.project;
+    this.serviceRole = validOptions.serviceRole;
   }
 
   /**
@@ -49,6 +71,9 @@ export class AgentIdentity implements IAgentIdentity {
     }
     if (this.project) {
       attrs['project.id'] = this.project;
+    }
+    if (this.serviceRole) {
+      attrs['traccia.service_role'] = this.serviceRole;
     }
     return attrs;
   }

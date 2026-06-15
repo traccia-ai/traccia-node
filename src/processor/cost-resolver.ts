@@ -81,16 +81,18 @@ export class CostResolver {
   }
 }
 
-// Module-level singleton
-let _resolver: CostResolver | null = null;
+// Process-level singleton using globalThis
+const GLOBAL_RESOLVER_KEY = Symbol.for('__TRACCIA_COST_RESOLVER__');
 
 export function getResolver(): CostResolver {
-  if (!_resolver) {
-    _resolver = new CostResolver(DEFAULT_PRICING);
+  const globalAny = globalThis as any;
+  if (!globalAny[GLOBAL_RESOLVER_KEY]) {
+    globalAny[GLOBAL_RESOLVER_KEY] = new CostResolver(DEFAULT_PRICING);
   }
-  return _resolver;
+  return globalAny[GLOBAL_RESOLVER_KEY];
 }
 
 export function setResolver(resolver: CostResolver): void {
-  _resolver = resolver;
+  const globalAny = globalThis as any;
+  globalAny[GLOBAL_RESOLVER_KEY] = resolver;
 }

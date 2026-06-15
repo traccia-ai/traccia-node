@@ -13,6 +13,8 @@ export interface AgentEnrichmentOptions {
     defaultAgentId?: string;
     /** Default environment (default: "production") */
     defaultEnv?: string;
+    /** Service role */
+    serviceRole?: string;
 }
 
 interface AgentMetadata {
@@ -106,6 +108,7 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
     private defaultDescription?: string;
     private catalog: AgentCatalog;
     private singleAgentId?: string;
+    private serviceRole?: string;
 
     constructor(options: AgentEnrichmentOptions = {}) {
         this.defaultAgentId = options.defaultAgentId || getEnv('AGENT_DASHBOARD_AGENT_ID');
@@ -128,6 +131,7 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
         if (catalogKeys.length === 1) {
             this.singleAgentId = catalogKeys[0];
         }
+        this.serviceRole = options.serviceRole;
     }
 
     /**
@@ -141,6 +145,10 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
      * Called when span ends - enrich with agent metadata.
      */
     onEnd(span: ISpan): void {
+        if (this.serviceRole === 'orchestrator') {
+            return;
+        }
+
         const attrs = span.attributes || {};
 
         // Resolve agent id
