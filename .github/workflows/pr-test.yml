@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - main
+      - development
+      - staging
 
 jobs:
   test:
@@ -25,3 +27,9 @@ jobs:
 
       - name: Test
         run: npm run test
+
+      - name: Publish CTRF Test Summary Results
+        run: npx github-actions-ctrf ctrf/ctrf-report.json
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
