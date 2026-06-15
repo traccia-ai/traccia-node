@@ -9,6 +9,7 @@ import {
   RISK_TIER,
   INTEGRITY_HASH,
 } from "../governance/schema";
+import { governanceHooks } from "../governance/hooks";
 
 export interface GovernanceEnrichmentOptions {
   defaultEventType?: string;
@@ -25,6 +26,10 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
   constructor(options?: GovernanceEnrichmentOptions) {
     this.defaultEventType = options?.defaultEventType ?? "inference";
     this.euRiskTier = options?.euRiskTier;
+  }
+
+  onStart(span: ISpan): void {
+    governanceHooks.triggerBeforeExecute(span);
   }
 
   onEnd(span: ISpan): void {
@@ -62,6 +67,8 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
       const hash = crypto.createHash("sha256").update(payload).digest("hex");
       span.setAttribute(INTEGRITY_HASH, hash);
     }
+
+    governanceHooks.triggerAfterExecute(span);
   }
 
   shutdown(): void {

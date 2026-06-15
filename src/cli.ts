@@ -33,6 +33,7 @@ program
         '   Set endpoint in traccia.toml or use --endpoint flag'
       );
       process.exit(1);
+      return;
     }
 
     console.log(`🔍 Checking connectivity to ${endpoint}...`);
@@ -67,6 +68,7 @@ program
         } else {
           console.error(`❌ HTTP Error ${status}: ${error.response.statusText}`);
           process.exit(1);
+          return;
         }
       } else {
         console.error(`❌ Connection failed: ${error}`);
@@ -74,6 +76,7 @@ program
           '   Make sure the endpoint is running and accessible'
         );
         process.exit(1);
+        return;
       }
     }
   });
@@ -93,6 +96,7 @@ configCommand
       console.error('❌ Config file already exists at', configPath);
       console.error('   Use --force to overwrite');
       process.exit(1);
+      return;
     }
 
     const configTemplate = `# Traccia SDK Configuration File
@@ -202,6 +206,7 @@ enable_span_logging = false
     } catch (error) {
       console.error('❌ Failed to create config file:', error);
       process.exit(1);
+      return;
     }
   });
 
@@ -329,6 +334,7 @@ program
         `⚠️  Found ${issuesFound} issue(s). Please review the messages above.`
       );
       process.exit(1);
+      return;
     }
   });
 
@@ -405,6 +411,7 @@ program
     if (!snapshot) {
       console.log('Failed to fetch pricing from both platform and upstream source.');
       process.exit(1);
+      return;
     }
     
     const cachePath = writeLocalCache(snapshot);

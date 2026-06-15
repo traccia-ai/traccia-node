@@ -130,7 +130,8 @@ export function createTracedAxios(): unknown {
     try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
         const axios = require('axios');
-        const instance = axios.create();
+        const axiosInstance = axios.default || axios;
+        const instance = axiosInstance.create();
 
         // Add request interceptor
         instance.interceptors.request.use(
@@ -154,7 +155,8 @@ export function createTracedAxios(): unknown {
         );
 
         return instance;
-    } catch {
+    } catch (err) {
+        console.error("Axios patch error", err);
         return null;
     }
 }
