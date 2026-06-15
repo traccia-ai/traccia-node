@@ -127,6 +127,8 @@
   "overrides": {
     "protobufjs": "^8.0.2",
     "esbuild": "^0.28.1",
-    "minimatch": "^9.0.9"
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^9.0.9"
+    }
   }
 }
