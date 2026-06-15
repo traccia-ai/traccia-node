@@ -12,10 +12,12 @@ import { CostAnnotatingProcessor } from './processor/cost-processor';
 import { LoggingSpanProcessor } from './processor/logging-processor';
 import { GuardrailDetectorProcessor } from './processor/guardrail-detector';
 import { GovernanceEnrichmentProcessor } from './processor/governance-enrichment';
+import { AgentEnrichmentProcessor } from './processor/agent-enricher';
 import { RedactionSpanProcessor } from './redaction/processor';
 import { HttpExporter, DEFAULT_ENDPOINT } from './exporter/http-exporter';
 import { OtlpExporter } from './exporter/otlp-exporter';
 import { ConsoleExporter } from './exporter/console-exporter';
+import { FileExporter } from './exporter/file-exporter';
 import { loadConfig } from './config/config';
 import { loadEnvFile, findAgentConfigPath } from './config/env-config';
 import { loadPricingWithSource } from './config/pricing-config';
@@ -103,6 +105,13 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   setTenantId(config.tenantId);
   setProjectId(config.projectId);
 
+  if (config.serviceRole) {
+    const providerAny = basicProvider as any;
+    if (providerAny.resource && providerAny.resource.attributes) {
+      providerAny.resource.attributes['traccia.service_role'] = config.serviceRole;
+    }
+  }
+
   // Get or create provider
   const provider = getTracerProvider();
 
@@ -131,6 +140,13 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   if (config.enableConsoleExporter || loadedConfig.exporters.enable_console) {
     const consoleExporter = new ConsoleExporter();
     exporter = new CompositeExporter([exporter, consoleExporter]);
+  }
+
+  if (config.enableFileExporter || loadedConfig.exporters.enable_file) {
+    const filePath = config.fileExporterPath || loadedConfig.exporters.file_exporter_path || 'traces.jsonl';
+    const resetOnStart = config.resetTraceFile || loadedConfig.exporters.reset_trace_file || false;
+    const fileExporter = new FileExporter({ filePath, resetOnStart });
+    exporter = new CompositeExporter([exporter, fileExporter]);
   }
 
   // Add processors
@@ -163,6 +179,13 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   if (redactPii) {
     provider.addSpanProcessor(new RedactionSpanProcessor());
   }
+
+  // Agent enrichment
+  provider.addSpanProcessor(
+    new AgentEnrichmentProcessor({
+      serviceRole: config.serviceRole,
+    })
+  );
 
   // Add batch processor with exporter
   const processor = new BatchSpanProcessor({

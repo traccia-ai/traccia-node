@@ -14,6 +14,12 @@ export {
 
 export { observe, ObserveOptions } from './instrumentation/decorator';
 export { getCurrentSpan } from './context/context';
+export {
+  W3CTraceContextPropagator,
+  injectHttpHeaders,
+  extractHttpHeaders,
+} from './context';
+export type { TextMapPropagator } from './context';
 
 export {
   TracerProvider,
@@ -168,6 +174,7 @@ import { getTracer } from './auto';
 import { observe } from './instrumentation/decorator';
 import { setSessionId, setUserId, setTenantId, setProjectId } from './config/runtime-config';
 import { getCurrentSpan } from './context/context';
+import { injectHttpHeaders, extractHttpHeaders } from './context';
 
 export const Traccia = {
   init,
@@ -178,5 +185,7 @@ export const Traccia = {
   setTenantId,
   setProjectId,
   getCurrentSpan,
+  injectHttpHeaders,
+  extractHttpHeaders,
 };
 

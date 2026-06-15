@@ -3,7 +3,8 @@
  */
 
 import { Meter } from '@opentelemetry/api';
-import { StandardMetrics, MetricsRecorder } from '../metrics/metrics';
+import { StandardMetrics } from '../metrics/meter';
+import { MetricsRecorder } from '../metrics/recorder';
 
 const mockMeter = {
   createHistogram: jest.fn().mockImplementation((_name: string, _options: unknown) => ({

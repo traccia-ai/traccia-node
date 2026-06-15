@@ -7,7 +7,7 @@
 
 // LangChain integrations
 export { TracciaCallbackHandler } from './langchain-callback';
-export { TracciaCallbackHandlerOld } from './langchain-callback.old';
+
 export {
   getTraciaHandler,
   withTracing,

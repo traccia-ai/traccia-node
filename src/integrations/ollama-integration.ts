@@ -19,6 +19,9 @@
  */
 
 import { getTraciaHandler, withTracing, setupLangChainWithTracing } from './auto-langchain';
+import { InstrumentationError } from '../errors';
+
+
 
 /**
  * Create a traced Ollama model for LangChain.
@@ -60,7 +63,7 @@ export async function createOllamaWithTracing(config: {
 
     return withTracing(ollamaModel);
   } catch (error) {
-    throw new Error(
+    throw new InstrumentationError(
       'Failed to create Ollama model. Make sure @langchain/ollama is installed and Ollama is running.\n' +
       'Install with: npm install @langchain/ollama\n' +
       'Run Ollama with: ollama serve'
@@ -121,7 +124,7 @@ export async function setupOllamaWithTracing(options: {
     }));
   } catch (error) {
     const err = error as Error;
-    throw new Error(`Failed to setup Ollama with tracing: ${err.message}`);
+    throw new InstrumentationError(`Failed to setup Ollama with tracing: ${err.message}`);
   }
 }
 
@@ -185,7 +188,7 @@ export async function createOllamaChatbot(options: {
     };
   } catch (error) {
     const err = error as Error;
-    throw new Error(`Failed to create Ollama chatbot: ${err.message}`);
+    throw new InstrumentationError(`Failed to create Ollama chatbot: ${err.message}`);
   }
 }
 
@@ -351,7 +354,7 @@ export async function createOllamaStreamingChatbot(options: {
     };
   } catch (error) {
     const err = error as Error;
-    throw new Error(
+    throw new InstrumentationError(
       `Failed to create streaming Ollama chatbot: ${err.message}`
     );
   }
