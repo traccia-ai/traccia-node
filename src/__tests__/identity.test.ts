@@ -28,4 +28,18 @@ describe('AgentIdentity', () => {
     expect(attrs['agent.name']).toBeUndefined();
     expect(attrs['env']).toBeUndefined();
   });
+
+  it('should throw ValidationError on invalid type', () => {
+    expect(() => {
+      // @ts-ignore
+      new AgentIdentity({ id: 'agent-1', type: 'invalid_type' });
+    }).toThrow('Invalid AgentIdentity configuration');
+  });
+
+  it('should validate serviceRole', () => {
+    const identity = new AgentIdentity({ id: 'agent-1', serviceRole: 'orchestrator' });
+    expect(identity.serviceRole).toBe('orchestrator');
+    const attrs = identity.toResourceAttributes();
+    expect(attrs['traccia.service_role']).toBe('orchestrator');
+  });
 });
