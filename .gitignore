@@ -3,6 +3,7 @@ dist/
 *.log
 .DS_Store
 coverage/
+ctrf/
 .env
 .env.local
 *.lock
