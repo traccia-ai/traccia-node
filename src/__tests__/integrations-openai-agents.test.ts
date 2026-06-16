@@ -32,7 +32,7 @@ describe('openai-agents integration', () => {
     it('should return true if already installed', () => {
       const { install: isolatedInstall } = require('../integrations/openai-agents');
       // Mock agents to succeed
-      jest.doMock('agents', () => ({
+      jest.doMock('@openai/agents', () => ({
         addTraceProcessor: jest.fn()
       }), { virtual: true });
       
@@ -42,7 +42,7 @@ describe('openai-agents integration', () => {
     });
 
     it('should return false if agents module is not available', () => {
-      jest.doMock('agents', () => {
+      jest.doMock('@openai/agents', () => {
         throw new Error('module not found');
       }, { virtual: true });
       
@@ -52,7 +52,7 @@ describe('openai-agents integration', () => {
     });
 
     it('should return false if addTraceProcessor is not present', () => {
-      jest.doMock('agents', () => ({}), { virtual: true });
+      jest.doMock('@openai/agents', () => ({}), { virtual: true });
       
       const { install: isolatedInstall } = require('../integrations/openai-agents');
       const result = isolatedInstall();
@@ -61,7 +61,7 @@ describe('openai-agents integration', () => {
 
     it('should install processor successfully', () => {
       const mockAddTraceProcessor = jest.fn();
-      jest.doMock('agents', () => ({
+      jest.doMock('@openai/agents', () => ({
         addTraceProcessor: mockAddTraceProcessor
       }), { virtual: true });
       
