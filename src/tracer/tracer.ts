@@ -42,7 +42,6 @@ export class Tracer implements ITracer {
         traceFlags: options.parentContext.traceFlags || 1,
         isRemote: true
       });
-      console.log(`🔗 TRACCIA PATCH: Continuing trace from parent context: TraceId:${options.parentContext.traceId} -> parentSpanId:${options.parentContext.spanId}`);
     } else if (options?.parent) {
       activeContext = trace.setSpanContext(activeContext, {
         traceId: options.parent.context.traceId,
