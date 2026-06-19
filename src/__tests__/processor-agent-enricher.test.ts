@@ -21,6 +21,19 @@ describe('AgentEnrichmentProcessor', () => {
         jest.clearAllMocks();
         delete process.env.AGENT_DASHBOARD_AGENT_ID;
         delete process.env.AGENT_DASHBOARD_ENV;
+        delete process.env.TRACCIA_AGENT_ID;
+        delete process.env.TRACCIA_ENV;
+    });
+
+    it('prefers TRACCIA_* env vars for default agent identity', () => {
+        process.env.TRACCIA_AGENT_ID = 'traccia-agent';
+        process.env.TRACCIA_ENV = 'staging';
+
+        const processor = new AgentEnrichmentProcessor();
+        processor.onEnd(mockSpan);
+
+        expect(mockSpan.setAttribute).toHaveBeenCalledWith('agent.id', 'traccia-agent');
+        expect(mockSpan.setAttribute).toHaveBeenCalledWith('env', 'staging');
     });
 
     it('loads catalog from file format 1', () => {

@@ -55,4 +55,16 @@ describe('Index Exports', () => {
             expect((mainIndex as any)[key]).toBeDefined();
         }
     });
+
+    it('should export spanScope from main index.ts', () => {
+        expect(typeof (mainIndex as any).spanScope).toBe('function');
+    });
+
+    it('should export runWithSpan from main index.ts', () => {
+        expect(typeof (mainIndex as any).runWithSpan).toBe('function');
+    });
+
+    it('should export runWithSpanAsync from main index.ts', () => {
+        expect(typeof (mainIndex as any).runWithSpanAsync).toBe('function');
+    });
 });

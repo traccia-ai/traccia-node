@@ -146,10 +146,12 @@ export function wrapOpenAICreate<T>(
             attributes['llm.prompt'] = promptText;
         }
         if (messages.length > 0) {
-            attributes['llm.messages'] = JSON.stringify(messages).slice(0, 2000);
+            const serialized = JSON.stringify(messages).slice(0, 2000);
+            attributes['llm.openai.messages'] = serialized;
+            attributes['llm.messages'] = serialized;
         }
 
-        return tracer.startActiveSpan('llm.openai.chat', async (span: ISpan) => {
+        return tracer.startActiveSpan('llm.openai.chat.completions', async (span: ISpan) => {
             for (const [key, value] of Object.entries(attributes)) {
                 span.setAttribute(key, value);
             }
@@ -163,15 +165,22 @@ export function wrapOpenAICreate<T>(
                     span.setAttribute('llm.usage.source', 'provider_usage');
                     if (usage.prompt_tokens !== undefined) {
                         span.setAttribute('llm.usage.prompt_tokens', usage.prompt_tokens);
+                        span.setAttribute('llm.usage.input_tokens', usage.prompt_tokens);
                         span.setAttribute('llm.usage.prompt_source', 'provider_usage');
                     }
                     if (usage.completion_tokens !== undefined) {
                         span.setAttribute('llm.usage.completion_tokens', usage.completion_tokens);
+                        span.setAttribute('llm.usage.output_tokens', usage.completion_tokens);
                         span.setAttribute('llm.usage.completion_source', 'provider_usage');
                     }
                     if (usage.total_tokens !== undefined) {
                         span.setAttribute('llm.usage.total_tokens', usage.total_tokens);
                     }
+                }
+
+                const respModel = safeGet(response, 'model') as string | undefined;
+                if (respModel && !span.attributes['llm.model']) {
+                    span.setAttribute('llm.model', respModel);
                 }
 
                 // Extract response content
@@ -181,6 +190,7 @@ export function wrapOpenAICreate<T>(
                     const message = firstChoice?.message as Record<string, unknown>;
                     if (message?.content) {
                         const content = String(message.content).slice(0, 1000);
+                        span.setAttribute('llm.completion', content);
                         span.setAttribute('llm.response', content);
                     }
                     if (firstChoice?.finish_reason) {
@@ -256,7 +266,9 @@ export function wrapOpenAIResponsesCreate<T>(
         // Extract input
         if (typeof input === 'string') {
             attributes['llm.prompt'] = input.slice(0, 500);
+            attributes['llm.openai.input'] = input.slice(0, 500);
         } else if (Array.isArray(input) && input.length > 0) {
+            attributes['llm.openai.input'] = JSON.stringify(input).slice(0, 2000);
             const lastUserInput = input.filter(
                 (i: unknown) => typeof i === 'object' && (i as Record<string, unknown>).type === 'user'
             ).pop();
@@ -287,9 +299,20 @@ export function wrapOpenAIResponsesCreate<T>(
                     if (textItems.length > 0) {
                         const text = (textItems[0] as Record<string, unknown>).text;
                         if (typeof text === 'string') {
+                            span.setAttribute('llm.completion', text.slice(0, 1000));
                             span.setAttribute('llm.response', text.slice(0, 1000));
                         }
                     }
+                }
+
+                const respModel = safeGet(response, 'model') as string | undefined;
+                if (respModel && !span.attributes['llm.model']) {
+                    span.setAttribute('llm.model', respModel);
+                }
+
+                const status = safeGet(response, 'status') as string | undefined;
+                if (status) {
+                    span.setAttribute('llm.response.status', status);
                 }
 
                 // Extract usage
@@ -299,10 +322,20 @@ export function wrapOpenAIResponsesCreate<T>(
                     if (usage.input_tokens !== undefined) {
                         span.setAttribute('llm.usage.prompt_tokens', usage.input_tokens);
                         span.setAttribute('llm.usage.input_tokens', usage.input_tokens);
+                        span.setAttribute('llm.usage.prompt_source', 'provider_usage');
                     }
                     if (usage.output_tokens !== undefined) {
                         span.setAttribute('llm.usage.completion_tokens', usage.output_tokens);
                         span.setAttribute('llm.usage.output_tokens', usage.output_tokens);
+                        span.setAttribute('llm.usage.completion_source', 'provider_usage');
+                    }
+                    if (usage.total_tokens !== undefined) {
+                        span.setAttribute('llm.usage.total_tokens', usage.total_tokens);
+                    } else if (usage.input_tokens !== undefined && usage.output_tokens !== undefined) {
+                        span.setAttribute(
+                            'llm.usage.total_tokens',
+                            usage.input_tokens + usage.output_tokens,
+                        );
                     }
                 }
 

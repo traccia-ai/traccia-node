@@ -236,3 +236,23 @@ export async function loadPricing(override?: PricingTable): Promise<PricingTable
   const [pricing] = await loadPricingWithSource(override);
   return pricing;
 }
+
+/**
+ * Return the age in days of a pricing snapshot (aligned with traccia-py).
+ */
+export function snapshotAgeDays(generatedAt: string): number | undefined {
+  if (!generatedAt || generatedAt === 'unknown') {
+    return undefined;
+  }
+
+  try {
+    const ts = new Date(generatedAt.replace('Z', '+00:00'));
+    if (Number.isNaN(ts.getTime())) {
+      return undefined;
+    }
+    const deltaMs = Date.now() - ts.getTime();
+    return deltaMs / 86_400_000;
+  } catch {
+    return undefined;
+  }
+}
