@@ -56,11 +56,12 @@ export class CostResolver {
     promptTokens: number,
     completionTokens: number
   ): number | undefined {
-    const pricing = this.table[model];
-    if (!pricing) {
+    const matched = this.lookupPrice(model);
+    if (!matched) {
       return undefined;
     }
 
+    const [, pricing] = matched;
     let cost = 0;
     if (promptTokens) {
       cost += (promptTokens / 1000) * pricing.inputCost;
@@ -70,6 +71,37 @@ export class CostResolver {
     }
 
     return cost > 0 ? cost : undefined;
+  }
+
+  public matchPricingModelKey(model: string): string | undefined {
+    return this.lookupPrice(model)?.[0];
+  }
+
+  private lookupPrice(model: string): [string, { inputCost: number; outputCost: number }] | undefined {
+    const normalized = String(model || '').trim();
+    if (!normalized) {
+      return undefined;
+    }
+
+    if (this.table[normalized]) {
+      return [normalized, this.table[normalized]];
+    }
+
+    const lower = normalized.toLowerCase();
+    for (const [key, value] of Object.entries(this.table)) {
+      if (key.toLowerCase() === lower) {
+        return [key, value];
+      }
+    }
+
+    const keys = Object.keys(this.table).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      if (lower.startsWith(key.toLowerCase())) {
+        return [key, this.table[key]];
+      }
+    }
+
+    return undefined;
   }
 
   public snapshot(): { table: PricingTable; source: string; generatedAt: string } {

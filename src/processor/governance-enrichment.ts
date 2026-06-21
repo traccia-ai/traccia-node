@@ -39,12 +39,12 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
     
     const attrs = span.attributes || {};
     
-    // Set event type if not present
-    const eventType = (attrs[EVENT_TYPE] as string) || (attrs["span.type"] as string);
+    // Set event type if not present (ignore span.type — aligned with traccia-py)
+    let eventType = attrs[EVENT_TYPE] as string | undefined;
     if (!eventType) {
       const name = span.name || "";
-      const inferredType = name.includes("tool") ? "tool_call" : this.defaultEventType;
-      span.setAttribute(EVENT_TYPE, inferredType);
+      eventType = name.toLowerCase().includes("tool") ? "tool_call" : this.defaultEventType;
+      span.setAttribute(EVENT_TYPE, eventType);
     }
     
     // Set timestamp source if not present
@@ -62,8 +62,8 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
       const crypto = require("crypto");
       const traceId = span.context?.traceId || "";
       const spanId = span.context?.spanId || "";
-      const eventType = (attrs[EVENT_TYPE] as string) || this.defaultEventType;
-      const payload = `${traceId}:${spanId}:${eventType}`;
+      const eventTypeForHash = (span.attributes[EVENT_TYPE] as string) || this.defaultEventType;
+      const payload = `${traceId}:${spanId}:${eventTypeForHash}`;
       const hash = crypto.createHash("sha256").update(payload).digest("hex");
       span.setAttribute(INTEGRITY_HASH, hash);
     }
