@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-20
+
+### Added
+- `spanScope`, `runWithSpan`, `runWithSpanAsync` APIs for explicit span lifecycle control (Python SDK parity)
+- `resolveServiceName()` helper with `OTEL_SERVICE_NAME` / `TRACCIA_SERVICE_NAME` / cwd fallback
+- OTLP export now includes resource attributes: `service.name`, `tenant.id`, `agent.id`, `session.id`, `env`, `service_role`, `trace.debug`
+- Cost processor: writes `llm.cost.usd`, `llm.pricing.*` metadata, staleness warnings at 7d (info) and 30d (warn)
+- Cost resolver: prefix model matching via `lookupPrice` / `matchPricingModelKey`
+- Token counter: `llm.usage.prompt_tokens` / `llm.usage.completion_tokens` / `llm.usage.total_tokens` attributes with `llm.usage.source`
+- OpenAI instrumentation: `llm.completion`, `llm.openai.messages`, usage attribute aliases, response model backfill
+
+### Changed
+- OpenAI span renamed from `llm.openai.chat` to `llm.openai.chat.completions` for schema alignment with Python SDK
+- Cost processor: skips cost annotation when `span.type` is present and not `"llm"` (case-insensitive)
+- Governance enrichment: no longer uses `span.type` as `governance.event_type` (uses inference heuristic instead)
+- Agent enricher: prefers `TRACCIA_AGENT_ID` / `TRACCIA_ENV` / `TRACCIA_AGENT_NAME` over legacy `AGENT_DASHBOARD_*` env vars
+- OTLP exporter: includes `parentSpanContext` for correct trace hierarchy
+
+### Fixed
+- Removed debug `console.log` from tracer continuation logic
+
 ## [1.0.0] - 2024-01-15
 
 ### Added

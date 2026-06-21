@@ -68,4 +68,13 @@ describe('CostResolver', () => {
     expect(r.getSource).toBe('test-source');
     expect(r.getGeneratedAt).toBe('test-time');
   });
+
+  it('matches version-suffixed model names via longest prefix', () => {
+    resolver.update({
+      'gpt-4o': { inputCost: 0.005, outputCost: 0.015 },
+      'gpt-4': { inputCost: 0.03, outputCost: 0.06 },
+    });
+    expect(resolver.matchPricingModelKey('gpt-4o-2024-08-06')).toBe('gpt-4o');
+    expect(resolver.compute('gpt-4o-2024-08-06', 1000, 500)).toBeDefined();
+  });
 });

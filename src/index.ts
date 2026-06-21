@@ -13,7 +13,9 @@ export {
 } from './auto';
 
 export { observe, ObserveOptions } from './instrumentation/decorator';
-export { getCurrentSpan } from './context/context';
+export { getCurrentSpan, runWithSpan, runWithSpanAsync } from './context/context';
+export { spanScope } from './context/span-scope';
+export type { SpanScope, SpanScopeOptions } from './context/span-scope';
 export {
   W3CTraceContextPropagator,
   injectHttpHeaders,

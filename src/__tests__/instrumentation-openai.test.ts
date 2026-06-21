@@ -74,11 +74,16 @@ describe('OpenAI Instrumentation', () => {
             });
 
             expect(getTracer).toHaveBeenCalledWith('openai');
-            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith('llm.openai.chat', expect.any(Function));
+            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith(
+                'llm.openai.chat.completions',
+                expect.any(Function),
+            );
             
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.vendor', 'openai');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.model', 'gpt-4');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.prompt', 'Hello');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.openai.messages', expect.any(String));
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.completion', 'response text');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.response', 'response text');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.finish_reason', 'stop');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.usage.prompt_tokens', 10);
@@ -130,9 +135,11 @@ describe('OpenAI Instrumentation', () => {
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.api', 'responses');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.model', 'o1-preview');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.prompt', 'Hello response API');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.completion', 'response output');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.response', 'response output');
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.usage.input_tokens', 15);
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.usage.output_tokens', 25);
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.usage.total_tokens', 40);
             expect(mockSpan.end).toHaveBeenCalled();
         });
 

@@ -11,6 +11,9 @@ interface RuntimeConfig {
   userId?: string;
   tenantId?: string;
   projectId?: string;
+  agentId?: string;
+  agentName?: string;
+  env?: string;
   debug: boolean;
   attrTruncationLimit?: number;
 }
@@ -91,6 +94,30 @@ export function setTenantId(id?: string): void {
  */
 export function setProjectId(id?: string): void {
   config.projectId = id;
+}
+
+export function setAgentId(id?: string): void {
+  config.agentId = id;
+}
+
+export function getAgentId(): string | undefined {
+  return config.agentId;
+}
+
+export function setAgentName(name?: string): void {
+  config.agentName = name;
+}
+
+export function getAgentName(): string | undefined {
+  return config.agentName;
+}
+
+export function setEnv(value?: string): void {
+  config.env = value;
+}
+
+export function getEnv(): string | undefined {
+  return config.env;
 }
 
 /**
