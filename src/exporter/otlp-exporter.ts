@@ -24,6 +24,7 @@ enum SpanKind {
 
 import { InstrumentationScope } from '@opentelemetry/core';
 import { ISpan, ISpanExporter, SpanStatus } from '../types';
+import { resolveServiceName } from '../config/service-name';
 
 // Hardcoded version to avoid JSON import issues
 import { version as tracciaVersion } from "../../package.json";
@@ -36,6 +37,10 @@ export interface OtlpExporterOptions {
     apiKey?: string;
     timeout?: number;
     headers?: Record<string, string>;
+    /** OTLP resource service.name (defaults to TRACCIA_SERVICE_NAME / OTEL_SERVICE_NAME env) */
+    serviceName?: string;
+    /** Additional OTLP resource attributes (tenant.id, agent.id, etc.) */
+    resourceAttributes?: Record<string, unknown>;
 }
 
 export class OtlpExporter implements ISpanExporter {
@@ -56,7 +61,11 @@ export class OtlpExporter implements ISpanExporter {
         });
 
         this.resource = resourceFromAttributes({
-            'service.name': 'traccia-app', // Default service name, could be improved
+            ...(options.resourceAttributes || {}),
+            'service.name':
+                options.serviceName ||
+                (options.resourceAttributes?.['service.name'] as string | undefined) ||
+                resolveServiceName(),
             'telemetry.sdk.name': 'traccia-ts',
             'telemetry.sdk.language': 'nodejs',
             'telemetry.sdk.version': tracciaVersion,
@@ -116,6 +125,14 @@ export class OtlpExporter implements ISpanExporter {
             attributes: e.attributes as any,
         }));
 
+        const parentSpanContext = span.parentSpanId
+            ? {
+                traceId: span.context.traceId,
+                spanId: span.parentSpanId,
+                traceFlags: span.context.traceFlags ?? 1,
+            }
+            : undefined;
+
         return {
             name: span.name,
             kind: SpanKind.INTERNAL, // Traccia doesn't support SpanKind yet, default to INTERNAL
@@ -126,6 +143,7 @@ export class OtlpExporter implements ISpanExporter {
                 isRemote: false, // assuming local
             }),
             parentSpanId: span.parentSpanId,
+            parentSpanContext,
             startTime,
             endTime,
             status,

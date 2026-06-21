@@ -11,6 +11,8 @@ export interface AgentEnrichmentOptions {
     agentConfigPath?: string;
     /** Default agent ID if not found in span attributes */
     defaultAgentId?: string;
+    /** Default agent name if not found in span attributes */
+    defaultAgentName?: string;
     /** Default environment (default: "production") */
     defaultEnv?: string;
     /** Service role */
@@ -111,9 +113,19 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
     private serviceRole?: string;
 
     constructor(options: AgentEnrichmentOptions = {}) {
-        this.defaultAgentId = options.defaultAgentId || getEnv('AGENT_DASHBOARD_AGENT_ID');
-        this.defaultEnv = getEnv('AGENT_DASHBOARD_ENV') || options.defaultEnv || 'production';
-        this.defaultName = getEnv('AGENT_DASHBOARD_AGENT_NAME');
+        this.defaultAgentId =
+            options.defaultAgentId ||
+            getEnv('TRACCIA_AGENT_ID') ||
+            getEnv('AGENT_DASHBOARD_AGENT_ID');
+        this.defaultEnv =
+            getEnv('TRACCIA_ENV') ||
+            getEnv('AGENT_DASHBOARD_ENV') ||
+            options.defaultEnv ||
+            'production';
+        this.defaultName =
+            options.defaultAgentName ||
+            getEnv('TRACCIA_AGENT_NAME') ||
+            getEnv('AGENT_DASHBOARD_AGENT_NAME');
         this.defaultType = getEnv('AGENT_DASHBOARD_AGENT_TYPE');
         this.defaultOwner = getEnv('AGENT_DASHBOARD_AGENT_OWNER');
         this.defaultTeam = getEnv('AGENT_DASHBOARD_AGENT_TEAM');

@@ -63,4 +63,19 @@ describe('GovernanceEnrichmentProcessor', () => {
 
     expect(span.attributes['governance.event_type']).toBe('custom_type');
   });
+
+  it('ignores span.type and defaults event_type to inference', () => {
+    const processor = new GovernanceEnrichmentProcessor();
+    const provider = new TracerProvider();
+    const tracer = provider.getTracer('test');
+
+    const span = tracer.startSpan('chat.streamText', {
+      attributes: { 'span.type': 'LLM' },
+    });
+
+    processor.onEnd(span);
+    span.end();
+
+    expect(span.attributes['governance.event_type']).toBe('inference');
+  });
 });
