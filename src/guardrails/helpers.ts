@@ -80,7 +80,7 @@ export function validateGuardrailAttributes(
   }
   
   for (const key of requiredKeys) {
-    if (attrs[key] === undefined && attrs[key] === null) {
+    if (attrs[key] === undefined || attrs[key] === null) {
       warnings.push(`Missing recommended guardrail attribute: ${key}`);
     }
   }

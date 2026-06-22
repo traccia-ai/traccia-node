@@ -1,10 +1,21 @@
 /**
- * Cost annotation processor.
+ * Cost annotation processor (aligned with traccia-py).
  */
 
 import { ISpan, ISpanProcessor } from '../types';
-import { PricingTable } from '../config/pricing-config';
-import { getResolver } from './cost-resolver';
+import { PricingTable, snapshotAgeDays } from '../config/pricing-config';
+import { CostResolver, getResolver, setResolver } from './cost-resolver';
+
+const WARN_AFTER_DAYS = 30;
+const INFO_AFTER_DAYS = 7;
+
+let stalenessWarned = false;
+
+export interface CostAnnotatingProcessorOptions {
+  pricingTable?: PricingTable;
+  pricingSource?: string;
+  pricingGeneratedAt?: string;
+}
 
 /**
  * Set the cached pricing table (used during initialization).
@@ -16,11 +27,6 @@ export function setCachedPricing(pricing: PricingTable): void {
 
 /**
  * Compute cost for a given model and token counts.
- *
- * @param model Model name
- * @param promptTokens Number of input/prompt tokens
- * @param completionTokens Number of output/completion tokens
- * @returns Cost in USD, or undefined if pricing not found
  */
 export function computeCost(
   model: string,
@@ -30,36 +36,129 @@ export function computeCost(
   return getResolver().compute(model, promptTokens, completionTokens);
 }
 
+function checkAndLogStaleness(generatedAt: string, ageDays: number | undefined): void {
+  if (stalenessWarned || ageDays == null) {
+    return;
+  }
+
+  if (ageDays > WARN_AFTER_DAYS) {
+    stalenessWarned = true;
+    console.warn(
+      `Traccia SDK pricing snapshot is ${Math.floor(ageDays)} days old (from ${generatedAt}). ` +
+        'Run pricing refresh for the latest rates, or view costs on the Traccia platform.',
+    );
+  } else if (ageDays > INFO_AFTER_DAYS) {
+    stalenessWarned = true;
+    console.info(
+      `Traccia SDK pricing snapshot is ${Math.floor(ageDays)} days old (from ${generatedAt}).`,
+    );
+  }
+}
+
+function readTokenCount(
+  attrs: Record<string, unknown>,
+  primary: string,
+  alias: string,
+  legacy?: string,
+): number | undefined {
+  const value = attrs[primary] ?? attrs[alias] ?? (legacy ? attrs[legacy] : undefined);
+  return typeof value === 'number' ? value : undefined;
+}
+
 /**
  * Cost annotation processor.
  */
 export class CostAnnotatingProcessor implements ISpanProcessor {
-  constructor(initialPricingTable?: PricingTable) {
-    if (initialPricingTable) {
-      getResolver().update(initialPricingTable);
+  private pricingSource: string;
+  private pricingGeneratedAt: string;
+
+  constructor(options: CostAnnotatingProcessorOptions = {}) {
+    if (options.pricingTable) {
+      getResolver().update(
+        options.pricingTable,
+        options.pricingSource,
+        options.pricingGeneratedAt,
+      );
+    }
+    const resolver = getResolver();
+    this.pricingSource = options.pricingSource ?? resolver.getSource;
+    this.pricingGeneratedAt = options.pricingGeneratedAt ?? resolver.getGeneratedAt;
+  }
+
+  updatePricingTable(
+    pricingTable: PricingTable,
+    pricingSource?: string,
+    pricingGeneratedAt?: string,
+  ): void {
+    getResolver().update(pricingTable, pricingSource, pricingGeneratedAt);
+    if (pricingSource) {
+      this.pricingSource = pricingSource;
+    }
+    if (pricingGeneratedAt) {
+      this.pricingGeneratedAt = pricingGeneratedAt;
     }
   }
 
   onEnd(span: ISpan): void {
     try {
-      const model = span.attributes['model'] as string | undefined;
-      if (!model) {
+      const attrs = span.attributes || {};
+      if (attrs['llm.cost.usd'] != null) {
         return;
       }
 
-      const inputTokens = span.attributes['input_tokens'] as number | undefined;
-      const outputTokens = span.attributes['output_tokens'] as number | undefined;
+      const spanType = String(attrs['span.type'] ?? '').toLowerCase();
+      if (spanType && spanType !== 'llm') {
+        return;
+      }
 
-      const cost = getResolver().compute(
-        model,
-        inputTokens || 0,
-        outputTokens || 0
+      const model = (attrs['llm.model'] ?? attrs['model']) as string | undefined;
+      const promptTokens = readTokenCount(
+        attrs,
+        'llm.usage.prompt_tokens',
+        'llm.usage.input_tokens',
+        'input_tokens',
+      );
+      const completionTokens = readTokenCount(
+        attrs,
+        'llm.usage.completion_tokens',
+        'llm.usage.output_tokens',
+        'output_tokens',
       );
 
-      if (cost && cost > 0) {
-        // Direct attribute modification for processors (after span ends)
-        span.attributes['cost_usd'] = cost;
+      if (!model || promptTokens == null || completionTokens == null) {
+        return;
       }
+
+      const resolver = getResolver();
+      const cost = resolver.compute(model, promptTokens, completionTokens);
+      if (cost == null) {
+        return;
+      }
+
+      checkAndLogStaleness(this.pricingGeneratedAt, snapshotAgeDays(this.pricingGeneratedAt));
+
+      span.setAttribute('llm.cost.usd', cost);
+      span.setAttribute('cost_usd', cost);
+
+      const usageSource =
+        (attrs['llm.usage.source'] as string | undefined) ||
+        (attrs['llm.cost.source'] as string | undefined) ||
+        'unknown';
+      span.setAttribute('llm.usage.source', usageSource);
+      span.setAttribute('llm.cost.source', usageSource);
+      span.setAttribute('llm.pricing.source', this.pricingSource);
+
+      const modelKey = resolver.matchPricingModelKey(model);
+      if (modelKey) {
+        span.setAttribute('llm.pricing.model_key', modelKey);
+      }
+
+      span.setAttribute('llm.pricing.generated_at', this.pricingGeneratedAt);
+      const ageDays = snapshotAgeDays(this.pricingGeneratedAt);
+      if (ageDays != null) {
+        span.setAttribute('llm.pricing.age_days', Math.floor(ageDays));
+      }
+      span.setAttribute('llm.pricing.snapshot_version', this.pricingGeneratedAt);
     } catch {
       // Silently fail
     }
@@ -73,3 +172,5 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
     // No-op
   }
 }
+
+export { CostResolver, getResolver, setResolver };

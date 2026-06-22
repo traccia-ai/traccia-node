@@ -76,6 +76,7 @@ export const ENV_VAR_MAPPING: { [key: string]: string[] } = {
   'tracing.endpoint': ['TRACCIA_ENDPOINT', 'AGENT_DASHBOARD_ENDPOINT'],
   'tracing.sample_rate': ['TRACCIA_SAMPLE_RATE', 'AGENT_DASHBOARD_SAMPLE_RATE'],
   'tracing.use_otlp': ['TRACCIA_USE_OTLP'],
+  'tracing.service_name': ['TRACCIA_SERVICE_NAME', 'TRACCIA_AGENT_NAME', 'OTEL_SERVICE_NAME'],
   'exporters.enable_console': ['TRACCIA_ENABLE_CONSOLE'],
   'exporters.enable_file': ['TRACCIA_ENABLE_FILE'],
   'exporters.file_exporter_path': ['TRACCIA_FILE_PATH'],
