@@ -18,7 +18,7 @@ export function install(enabled?: boolean): boolean {
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const agents = require("agents");
+    const agents = require("@openai/agents");
     if (!agents || !agents.addTraceProcessor) {
       return false;
     }

@@ -122,6 +122,9 @@ export interface SDKConfig {
   maxExportBatchSize?: number;
   scheduleDelayMs?: number;
   enableConsoleExporter?: boolean;
+  enableFileExporter?: boolean;
+  fileExporterPath?: string;
+  resetTraceFile?: boolean;
   useOtlp?: boolean;
   enableTokenCounting?: boolean;
   enableCostTracking?: boolean;
@@ -146,6 +149,7 @@ export interface SDKConfig {
   enableMetrics?: boolean;
   metricsEndpoint?: string;
   metricsSampleRate?: number;
+  serviceRole?: 'agent' | 'orchestrator';
 }
 
 /**

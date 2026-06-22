@@ -6,6 +6,7 @@
  */
 
 import { TracciaCallbackHandler } from './langchain-callback';
+import { InstrumentationError } from '../errors';
 
 /**
  * Global handler instance to avoid creating multiple handlers
@@ -74,7 +75,7 @@ export async function createTracedOpenAI(config: any): Promise<any> {
     const model = new langchainOpenai.ChatOpenAI(config);
     return withTracing(model);
   } catch (error) {
-    throw new Error(
+    throw new InstrumentationError(
       'Failed to create traced ChatOpenAI. Make sure @langchain/openai is installed.'
     );
   }
@@ -111,7 +112,7 @@ export async function createTracedAgentExecutor(options: {
     
     return executor;
   } catch (error) {
-    throw new Error(
+    throw new InstrumentationError(
       'Failed to create traced AgentExecutor. Make sure langchain/agents is installed.'
     );
   }
@@ -145,7 +146,7 @@ export async function createTracedLLMChain(options: {
     
     return chain;
   } catch (error) {
-    throw new Error(
+    throw new InstrumentationError(
       'Failed to create traced LLMChain. Make sure langchain/chains is installed.'
     );
   }
@@ -276,7 +277,7 @@ export async function setupLangChainWithTracing(options: {
     };
   } catch (error) {
     const err = error as Error;
-    throw new Error(
+    throw new InstrumentationError(
       `Failed to setup LangChain with tracing: ${err.message}`
     );
   }

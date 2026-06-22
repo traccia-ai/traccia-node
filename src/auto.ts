@@ -12,20 +12,30 @@ import { CostAnnotatingProcessor } from './processor/cost-processor';
 import { LoggingSpanProcessor } from './processor/logging-processor';
 import { GuardrailDetectorProcessor } from './processor/guardrail-detector';
 import { GovernanceEnrichmentProcessor } from './processor/governance-enrichment';
+import { AgentEnrichmentProcessor } from './processor/agent-enricher';
 import { RedactionSpanProcessor } from './redaction/processor';
 import { HttpExporter, DEFAULT_ENDPOINT } from './exporter/http-exporter';
 import { OtlpExporter } from './exporter/otlp-exporter';
 import { ConsoleExporter } from './exporter/console-exporter';
+import { FileExporter } from './exporter/file-exporter';
 import { loadConfig } from './config/config';
 import { loadEnvFile, findAgentConfigPath } from './config/env-config';
 import { loadPricingWithSource } from './config/pricing-config';
+import { resolveServiceName } from './config/service-name';
 import {
   updateConfig,
   setSessionId,
   setUserId,
   setTenantId,
   setProjectId,
+  setAgentId,
+  setAgentName,
+  setEnv,
+  getAgentId,
+  getAgentName,
+  getEnv as getRuntimeEnv,
 } from './config/runtime-config';
+import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
 
 let globalProvider: TracerProvider | null = null;
@@ -102,6 +112,55 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   setUserId(config.userId);
   setTenantId(config.tenantId);
   setProjectId(config.projectId);
+  setAgentId(process.env.TRACCIA_AGENT_ID || process.env.AGENT_DASHBOARD_AGENT_ID);
+  setAgentName(process.env.TRACCIA_AGENT_NAME || process.env.AGENT_DASHBOARD_AGENT_NAME);
+  setEnv(process.env.TRACCIA_ENV || process.env.AGENT_DASHBOARD_ENV);
+
+  const resolvedServiceName = resolveServiceName(
+    (config.resource?.['service.name'] as string | undefined) ||
+      loadedConfig.tracing.service_name,
+  );
+
+  const resourceAttributes: Record<string, unknown> = {
+    'service.name': resolvedServiceName,
+    ...(config.resource || {}),
+  };
+
+  if (config.tenantId || process.env.TRACCIA_TENANT_ID) {
+    resourceAttributes['tenant.id'] = config.tenantId || process.env.TRACCIA_TENANT_ID;
+  }
+  if (config.projectId || process.env.TRACCIA_PROJECT_ID) {
+    resourceAttributes['project.id'] = config.projectId || process.env.TRACCIA_PROJECT_ID;
+  }
+  if (config.sessionId || process.env.TRACCIA_SESSION_ID) {
+    resourceAttributes['session.id'] = config.sessionId || process.env.TRACCIA_SESSION_ID;
+  }
+  if (config.userId || process.env.TRACCIA_USER_ID) {
+    resourceAttributes['user.id'] = config.userId || process.env.TRACCIA_USER_ID;
+  }
+  if (getAgentId()) {
+    resourceAttributes['agent.id'] = getAgentId();
+  }
+  if (getAgentName()) {
+    resourceAttributes['agent.name'] = getAgentName();
+  }
+  if (getRuntimeEnv()) {
+    resourceAttributes['environment'] = getRuntimeEnv();
+    resourceAttributes['env'] = getRuntimeEnv();
+  }
+  if (config.serviceRole) {
+    resourceAttributes['traccia.service_role'] = config.serviceRole;
+  }
+  if (config.debug ?? loadedConfig.logging.debug) {
+    resourceAttributes['trace.debug'] = true;
+  }
+
+  if (config.serviceRole) {
+    const providerAny = basicProvider as any;
+    if (providerAny.resource && providerAny.resource.attributes) {
+      providerAny.resource.attributes['traccia.service_role'] = config.serviceRole;
+    }
+  }
 
   // Get or create provider
   const provider = getTracerProvider();
@@ -120,6 +179,8 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     exporter = new OtlpExporter({
       endpoint,
       apiKey,
+      serviceName: resolvedServiceName,
+      resourceAttributes,
     });
   } else {
     exporter = new HttpExporter({
@@ -133,6 +194,13 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     exporter = new CompositeExporter([exporter, consoleExporter]);
   }
 
+  if (config.enableFileExporter || loadedConfig.exporters.enable_file) {
+    const filePath = config.fileExporterPath || loadedConfig.exporters.file_exporter_path || 'traces.jsonl';
+    const resetOnStart = config.resetTraceFile || loadedConfig.exporters.reset_trace_file || false;
+    const fileExporter = new FileExporter({ filePath, resetOnStart });
+    exporter = new CompositeExporter([exporter, fileExporter]);
+  }
+
   // Add processors
   if (config.enableTokenCounting !== false && loadedConfig.instrumentation.enable_token_counting !== false) {
     provider.addSpanProcessor(new TokenCountingProcessor());
@@ -142,23 +210,36 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     const pricingTable = config.pricingOverride
       ? (config.pricingOverride as Record<string, { inputCost: number; outputCost: number }>)
       : undefined;
-    const [pricing] = await loadPricingWithSource(pricingTable);
-    provider.addSpanProcessor(new CostAnnotatingProcessor(pricing));
+    const [pricing, pricingSource, pricingGeneratedAt] = await loadPricingWithSource(pricingTable);
+    const costProcessor = new CostAnnotatingProcessor({
+      pricingTable: pricing,
+      pricingSource,
+      pricingGeneratedAt,
+    });
+    provider.addSpanProcessor(costProcessor);
+    setResolver(new CostResolver(pricing, pricingSource, pricingGeneratedAt));
   }
 
   if (config.enableSpanLogging || loadedConfig.logging.enable_span_logging) {
     provider.addSpanProcessor(new LoggingSpanProcessor());
   }
 
-  // Add guardrail detector processor
+  provider.addSpanProcessor(
+    new AgentEnrichmentProcessor({
+      agentConfigPath: agentConfigPath,
+      defaultAgentId: getAgentId(),
+      defaultAgentName: getAgentName(),
+      defaultEnv: getRuntimeEnv(),
+      serviceRole: config.serviceRole,
+    }),
+  );
+
   const guardrailHeuristics = config.guardrailHeuristics ?? loadedConfig.instrumentation.guardrail_heuristics ?? true;
   provider.addSpanProcessor(new GuardrailDetectorProcessor({ heuristicsEnabled: guardrailHeuristics }));
 
-  // Add governance enrichment processor
   const euRiskTier = config.compliance?.risk_tier as string | undefined;
   provider.addSpanProcessor(new GovernanceEnrichmentProcessor({ euRiskTier }));
 
-  // Add redaction processor if enabled
   const redactPii = config.redactPii ?? loadedConfig.instrumentation.redact_pii ?? false;
   if (redactPii) {
     provider.addSpanProcessor(new RedactionSpanProcessor());
