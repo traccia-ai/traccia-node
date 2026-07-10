@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-10
+
+### Added
+- `govern()` — observability plus runtime policy enforcement via Traccia platform agent-status API
+- `AgentBlockedError`, `checkAgentStatus()`, `disclosure()`, `enrichGovernanceAttributes()`
+- Exported `governanceHooks` / `GovernanceManager` for lifecycle hook registration
+- `runIdentity()` for run-scoped agent attribution (Python SDK parity)
+- Default policy URLs derived from tracing endpoint; advanced endpoint overrides via init or `[governance]` in `traccia.toml`
+
+### Changed
+- Documented that `govern()` requires Traccia platform; use `observe()` for tracing-only setups
+
 ## [0.1.4] - 2026-06-20
 
 ### Added
