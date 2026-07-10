@@ -150,6 +150,12 @@ export interface SDKConfig {
   metricsEndpoint?: string;
   metricsSampleRate?: number;
   serviceRole?: 'agent' | 'orchestrator';
+  /** Advanced: override agent status check URL ({agent_id} placeholder). */
+  statusCheckEndpoint?: string;
+  /** Advanced: override agent block telemetry URL ({agent_id} placeholder). */
+  postBlockEndpoint?: string;
+  /** Advanced: policy status cache TTL in seconds (default 60). */
+  statusCacheTtlSeconds?: number;
 }
 
 /**

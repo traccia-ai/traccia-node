@@ -37,6 +37,7 @@ import {
 } from './config/runtime-config';
 import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
+import { configureGovernance } from './governance/config';
 
 let globalProvider: TracerProvider | null = null;
 let started = false;
@@ -85,6 +86,12 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   // Load configuration (files + env vars)
   const loadedConfig = loadConfig();
+
+  configureGovernance({
+    statusCheckEndpoint: config.statusCheckEndpoint,
+    postBlockEndpoint: config.postBlockEndpoint,
+    statusCacheTtlSeconds: config.statusCacheTtlSeconds,
+  });
 
   // overrides from argument 'config' take precedence
   const apiKey = config.apiKey || loadedConfig.tracing.api_key || '';
