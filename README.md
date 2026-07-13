@@ -222,6 +222,17 @@ import { disclosure } from '@traccia/sdk';
 disclosure({ channel: 'ui', disclosedToUser: true });
 ```
 
+### HIPAA-oriented init
+
+```ts
+init({
+  compliance: { frameworks: ['hipaa'] },
+  redactPii: true, // recommended; defaults on when hipaa is in frameworks unless set false
+});
+```
+
+Soft warnings only — Traccia does not block PHI. See [HIPAA docs](https://traccia.ai/docs/compliance/hipaa) and the [Trust Center](https://traccia.ai/trust-center). No signed BAA yet — contact [support@traccia.ai](mailto:support@traccia.ai).
+
 ---
 
 ## License

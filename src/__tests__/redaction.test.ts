@@ -25,6 +25,15 @@ describe('redactString', () => {
     expect(result).toBe('My SSN is [REDACTED_SSN]');
   });
 
+  it('should redact MRN, NPI, and DOB heuristics', () => {
+    const result = redactString('Patient MRN: A12B34; NPI 1234567890; DOB 01/15/1980');
+    expect(result).toContain('[REDACTED_MRN]');
+    expect(result).toContain('[REDACTED_NPI]');
+    expect(result).toContain('[REDACTED_DOB]');
+    expect(result).not.toContain('A12B34');
+    expect(result).not.toContain('1234567890');
+  });
+
   it('should return empty string unchanged', () => {
     expect(redactString('')).toBe('');
     expect(redactString(null as unknown as string)).toBe('');

@@ -1,5 +1,6 @@
 /**
- * PII redaction - manual helpers and optional automatic span redaction before export.
+ * PII / best-effort PHI redaction - manual helpers and optional automatic span redaction before export.
+ * Regex only — not a guarantee that all PHI is removed.
  */
 
 import { REDACTION_APPLIED } from "../governance/schema";
@@ -9,6 +10,11 @@ export { REDACTION_APPLIED };
 const EMAIL = /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g;
 const PHONE = /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g;
 const SSN = /\b\d{3}-\d{2}-\d{4}\b/g;
+const MRN = /\b(?:MRN|mrn)[:\s#=-]*([A-Za-z0-9-]{4,})\b/g;
+const NPI = /\b(?:NPI|npi)[:\s#=-]*(\d{10})\b/g;
+const DOB =
+  /\b(?:DOB|dob|date of birth)[:\s=-]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/gi;
+const MEDICARE = /\b\d{4}-\d{4}-\d{4}\b/g;
 
 export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
   "prompt",
@@ -23,14 +29,24 @@ export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
   "response",
   "user",
   "assistant",
+  "phi",
+  "clinical",
+  "patient",
+  "diagnosis",
+  "medication",
 ]);
 
 export function redactString(text: string | null | undefined): string {
-  if (!text || typeof text !== 'string') return '';
+  if (!text || typeof text !== "string") return "";
   let result = text;
   result = result.replace(EMAIL, "[REDACTED_EMAIL]");
+  // Labeled PHI heuristics before generic phone/SSN so "NPI 1234567890" is not treated as a phone
+  result = result.replace(MRN, "MRN:[REDACTED_MRN]");
+  result = result.replace(NPI, "NPI:[REDACTED_NPI]");
+  result = result.replace(DOB, "DOB:[REDACTED_DOB]");
   result = result.replace(PHONE, "[REDACTED_PHONE]");
   result = result.replace(SSN, "[REDACTED_SSN]");
+  result = result.replace(MEDICARE, "[REDACTED_ID]");
   return result;
 }
 
