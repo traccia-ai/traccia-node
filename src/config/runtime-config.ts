@@ -2,6 +2,13 @@
  * Runtime configuration management.
  */
 
+import { AsyncLocalStorage } from 'async_hooks';
+
+interface RunIdentity {
+  agentId?: string;
+  agentName?: string;
+}
+
 interface RuntimeConfig {
   autoInstrumentTools: boolean;
   toolInclude: string[];
@@ -25,6 +32,8 @@ let config: RuntimeConfig = {
   maxSpanDepth: 10,
   debug: false,
 };
+
+const runIdentityStorage = new AsyncLocalStorage<RunIdentity>();
 
 /**
  * Get the current runtime configuration.
@@ -96,12 +105,12 @@ export function setProjectId(id?: string): void {
   config.projectId = id;
 }
 
-export function setAgentId(id?: string): void {
-  config.agentId = id;
+export function getAgentId(): string | undefined {
+  return runIdentityStorage.getStore()?.agentId ?? config.agentId;
 }
 
-export function getAgentId(): string | undefined {
-  return config.agentId;
+export function setAgentId(id?: string): void {
+  config.agentId = id;
 }
 
 export function setAgentName(name?: string): void {
@@ -109,7 +118,7 @@ export function setAgentName(name?: string): void {
 }
 
 export function getAgentName(): string | undefined {
-  return config.agentName;
+  return runIdentityStorage.getStore()?.agentName ?? config.agentName;
 }
 
 export function setEnv(value?: string): void {
@@ -132,4 +141,15 @@ export function setDebug(value: boolean): void {
  */
 export function setAttrTruncationLimit(limit?: number): void {
   config.attrTruncationLimit = limit;
+}
+
+/**
+ * Run-scoped agent identity for parallel runs in one process (matches Python run_identity).
+ */
+export function runIdentity<T>(
+  identity: { agentId?: string; agentName?: string },
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
+  const parent = runIdentityStorage.getStore() || {};
+  return runIdentityStorage.run({ ...parent, ...identity }, fn);
 }

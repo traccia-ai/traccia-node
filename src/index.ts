@@ -13,6 +13,13 @@ export {
 } from './auto';
 
 export { observe, ObserveOptions } from './instrumentation/decorator';
+export { govern, GovernOptions } from './governance/govern';
+export { AgentBlockedError, checkAgentStatus } from './governance/policy';
+export { disclosure, enrichGovernanceAttributes } from './governance/disclosure';
+export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './governance/disclosure';
+export { governanceHooks, GovernanceManager } from './governance/hooks';
+export type { GovernanceHook } from './governance/hooks';
+export { runIdentity } from './config/runtime-config';
 export { getCurrentSpan, runWithSpan, runWithSpanAsync } from './context/context';
 export { spanScope } from './context/span-scope';
 export type { SpanScope, SpanScopeOptions } from './context/span-scope';
@@ -122,8 +129,13 @@ export {
   INTEGRITY_HASH,
   RISK_TIER,
   ANNEX_III_CATEGORY,
+  HIPAA_FRAMEWORK_ENABLED,
+  HIPAA_PHI_REDACTION_APPLIED,
+  HIPAA_PREFIX,
   TRANSPARENCY_DISCLOSED,
   CONTENT_SYNTHETIC,
+  GOVERNANCE_PREFIX,
+  EU_AI_ACT_PREFIX,
 } from './governance/schema';
 export {
   RedactionSpanProcessor,
@@ -174,6 +186,7 @@ export { installOpenAIAgents, installCrewai } from './integrations';
 import { init } from './auto';
 import { getTracer } from './auto';
 import { observe } from './instrumentation/decorator';
+import { govern } from './governance/govern';
 import { setSessionId, setUserId, setTenantId, setProjectId } from './config/runtime-config';
 import { getCurrentSpan } from './context/context';
 import { injectHttpHeaders, extractHttpHeaders } from './context';
@@ -182,6 +195,7 @@ export const Traccia = {
   init,
   getTracer,
   observe,
+  govern,
   setSessionId,
   setUserId,
   setTenantId,

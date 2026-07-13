@@ -5,7 +5,26 @@ All notable changes to the Traccia SDK for TypeScript will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-07-13
+
+### Added
+- HIPAA governance attributes (`hipaa.*`) and PHI soft-warning / redaction support for healthcare workloads
+- Soft PHI warnings only — does not block spans; no signed BAA claim
+
+### Fixed
+- Redaction order: MRN / NPI / DOB patterns run before phone / SSN so NPI digits are not misclassified as phone numbers
+
+## [0.1.5] - 2026-07-10
+
+### Added
+- `govern()` — observability plus runtime policy enforcement via Traccia platform agent-status API
+- `AgentBlockedError`, `checkAgentStatus()`, `disclosure()`, `enrichGovernanceAttributes()`
+- Exported `governanceHooks` / `GovernanceManager` for lifecycle hook registration
+- `runIdentity()` for run-scoped agent attribution (Python SDK parity)
+- Default policy URLs derived from tracing endpoint; advanced endpoint overrides via init or `[governance]` in `traccia.toml`
+
+### Changed
+- Documented that `govern()` requires Traccia platform; use `observe()` for tracing-only setups
 
 ## [0.1.4] - 2026-06-20
 

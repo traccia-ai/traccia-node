@@ -4,6 +4,7 @@
 
 export const GOVERNANCE_PREFIX = "governance.";
 export const EU_AI_ACT_PREFIX = "eu_ai_act.";
+export const HIPAA_PREFIX = "hipaa.";
 
 export const EVENT_TYPE = `${GOVERNANCE_PREFIX}event_type`;
 export const AI_SYSTEM_ID = `${GOVERNANCE_PREFIX}ai_system_id`;
@@ -18,6 +19,9 @@ export const INTEGRITY_HASH = `${GOVERNANCE_PREFIX}integrity_hash`;
 
 export const RISK_TIER = `${EU_AI_ACT_PREFIX}risk_tier`;
 export const ANNEX_III_CATEGORY = `${EU_AI_ACT_PREFIX}annex_iii_category`;
+
+export const HIPAA_FRAMEWORK_ENABLED = `${HIPAA_PREFIX}framework_enabled`;
+export const HIPAA_PHI_REDACTION_APPLIED = `${HIPAA_PREFIX}phi_redaction_applied`;
 
 export const TRANSPARENCY_DISCLOSED = `${GOVERNANCE_PREFIX}transparency.disclosed`;
 export const CONTENT_SYNTHETIC = `${GOVERNANCE_PREFIX}content.synthetic`;

@@ -37,6 +37,7 @@ import {
 } from './config/runtime-config';
 import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
+import { configureGovernance } from './governance/config';
 
 let globalProvider: TracerProvider | null = null;
 let started = false;
@@ -85,6 +86,12 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   // Load configuration (files + env vars)
   const loadedConfig = loadConfig();
+
+  configureGovernance({
+    statusCheckEndpoint: config.statusCheckEndpoint,
+    postBlockEndpoint: config.postBlockEndpoint,
+    statusCacheTtlSeconds: config.statusCacheTtlSeconds,
+  });
 
   // overrides from argument 'config' take precedence
   const apiKey = config.apiKey || loadedConfig.tracing.api_key || '';
@@ -237,10 +244,18 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   const guardrailHeuristics = config.guardrailHeuristics ?? loadedConfig.instrumentation.guardrail_heuristics ?? true;
   provider.addSpanProcessor(new GuardrailDetectorProcessor({ heuristicsEnabled: guardrailHeuristics }));
 
-  const euRiskTier = config.compliance?.risk_tier as string | undefined;
-  provider.addSpanProcessor(new GovernanceEnrichmentProcessor({ euRiskTier }));
+  const frameworks = config.compliance?.frameworks || [];
+  const euRiskTier =
+    frameworks.includes("eu_ai_act") || config.compliance?.risk_tier
+      ? (config.compliance?.risk_tier as string | undefined)
+      : undefined;
+  const hipaaEnabled = frameworks.includes("hipaa");
+  provider.addSpanProcessor(new GovernanceEnrichmentProcessor({ euRiskTier, hipaaEnabled }));
 
-  const redactPii = config.redactPii ?? loadedConfig.instrumentation.redact_pii ?? false;
+  let redactPii = config.redactPii ?? loadedConfig.instrumentation.redact_pii ?? false;
+  if (hipaaEnabled && config.redactPii === undefined && loadedConfig.instrumentation.redact_pii === undefined) {
+    redactPii = true;
+  }
   if (redactPii) {
     provider.addSpanProcessor(new RedactionSpanProcessor());
   }

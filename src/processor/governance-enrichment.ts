@@ -8,12 +8,23 @@ import {
   TIMESTAMP_SOURCE,
   RISK_TIER,
   INTEGRITY_HASH,
+  REDACTION_APPLIED,
+  HIPAA_FRAMEWORK_ENABLED,
+  HIPAA_PHI_REDACTION_APPLIED,
 } from "../governance/schema";
 import { governanceHooks } from "../governance/hooks";
 
 export interface GovernanceEnrichmentOptions {
   defaultEventType?: string;
   euRiskTier?: string;
+  hipaaEnabled?: boolean;
+}
+
+let hipaaWarned = false;
+
+/** Test-only: reset one-shot HIPAA console warning. */
+export function _resetHipaaWarnForTests(): void {
+  hipaaWarned = false;
 }
 
 /**
@@ -22,10 +33,12 @@ export interface GovernanceEnrichmentOptions {
 export class GovernanceEnrichmentProcessor implements ISpanProcessor {
   private defaultEventType: string;
   private euRiskTier?: string;
+  private hipaaEnabled: boolean;
 
   constructor(options?: GovernanceEnrichmentOptions) {
     this.defaultEventType = options?.defaultEventType ?? "inference";
     this.euRiskTier = options?.euRiskTier;
+    this.hipaaEnabled = !!options?.hipaaEnabled;
   }
 
   onStart(span: ISpan): void {
@@ -36,28 +49,41 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
     if (!span.setAttribute) {
       return;
     }
-    
+
     const attrs = span.attributes || {};
-    
-    // Set event type if not present (ignore span.type — aligned with traccia-py)
+
     let eventType = attrs[EVENT_TYPE] as string | undefined;
     if (!eventType) {
       const name = span.name || "";
       eventType = name.toLowerCase().includes("tool") ? "tool_call" : this.defaultEventType;
       span.setAttribute(EVENT_TYPE, eventType);
     }
-    
-    // Set timestamp source if not present
+
     if (!attrs[TIMESTAMP_SOURCE]) {
       span.setAttribute(TIMESTAMP_SOURCE, "sdk");
     }
-    
-    // Set EU AI Act risk tier if configured
+
     if (this.euRiskTier && !attrs[RISK_TIER]) {
       span.setAttribute(RISK_TIER, this.euRiskTier);
     }
-    
-    // Set integrity hash if not present
+
+    if (this.hipaaEnabled) {
+      if (!attrs[HIPAA_FRAMEWORK_ENABLED]) {
+        span.setAttribute(HIPAA_FRAMEWORK_ENABLED, true);
+      }
+      if (attrs[REDACTION_APPLIED] && !attrs[HIPAA_PHI_REDACTION_APPLIED]) {
+        span.setAttribute(HIPAA_PHI_REDACTION_APPLIED, true);
+      }
+      if (!hipaaWarned) {
+        hipaaWarned = true;
+        console.warn(
+          "[traccia.governance] HIPAA framework enabled on spans. Prefer redactPii: true. " +
+            "Traccia Cloud does not currently offer a signed BAA — contact the Traccia team for healthcare onboarding. " +
+            "Enabling this does not make you HIPAA compliant.",
+        );
+      }
+    }
+
     if (!attrs[INTEGRITY_HASH]) {
       const crypto = require("crypto");
       const traceId = span.context?.traceId || "";

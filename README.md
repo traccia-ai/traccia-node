@@ -23,7 +23,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 - **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy.
 - **High Performance**: Efficient batching, async support, minimal overhead.
 - **W3C Trace Context**: Native distributed tracing header propagation.
-- **Governance & Policies**: Lifecycle hooks for pre- and post-execution checks.
+- **Governance & Policies**: Trace evidence enrichment, `disclosure()`, lifecycle hooks, and runtime `govern()` policy enforcement.
 - **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
 
 ---
@@ -173,6 +173,65 @@ import { stopTracing } from '@traccia/sdk';
 // Flush buffered spans and shut down the provider safely
 await stopTracing();
 ```
+
+---
+
+## Governance
+
+### `observe()` vs `govern()`
+
+| API | Purpose | Requires Traccia platform |
+|-----|---------|----------------------------|
+| `observe()` | Observability only | No |
+| `govern()` | Observability + runtime policy enforcement | **Yes** |
+
+`govern()` calls the Traccia agent-status API before each invocation. Tracing-only or self-hosted users should use `observe()`.
+
+Policy URLs are derived from your tracing endpoint automatically — no `[governance]` section needed unless you use custom endpoints.
+
+```typescript
+import { Traccia, govern, AgentBlockedError } from '@traccia/sdk';
+
+await Traccia.init({ apiKey: '...', endpoint: 'https://api.traccia.ai/v2/traces' });
+
+const runAgent = govern({
+  agentId: 'my-agent',
+  failOpen: false,
+  name: 'run_agent',
+})(async (prompt: string) => {
+  return callLlm(prompt);
+});
+```
+
+**Advanced (optional):** override endpoints in `traccia.toml`:
+
+```toml
+[governance]
+status_check_endpoint = "https://custom.example/agents/{agent_id}/status"
+post_block_endpoint = "https://custom.example/agents/{agent_id}/blocks"
+status_cache_ttl_seconds = 120
+```
+
+### Transparency — `disclosure()`
+
+Record EU AI Act Art. 50 transparency evidence on the active span when your UI shows an AI disclosure:
+
+```typescript
+import { disclosure } from '@traccia/sdk';
+
+disclosure({ channel: 'ui', disclosedToUser: true });
+```
+
+### HIPAA-oriented init
+
+```ts
+init({
+  compliance: { frameworks: ['hipaa'] },
+  redactPii: true, // recommended; defaults on when hipaa is in frameworks unless set false
+});
+```
+
+Soft warnings only — Traccia does not block PHI. See [HIPAA docs](https://traccia.ai/docs/compliance/hipaa) and the [Trust Center](https://traccia.ai/trust-center). No signed BAA yet — contact [support@traccia.ai](mailto:support@traccia.ai).
 
 ---
 
