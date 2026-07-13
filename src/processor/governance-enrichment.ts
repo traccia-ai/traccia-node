@@ -22,6 +22,11 @@ export interface GovernanceEnrichmentOptions {
 
 let hipaaWarned = false;
 
+/** Test-only: reset one-shot HIPAA console warning. */
+export function _resetHipaaWarnForTests(): void {
+  hipaaWarned = false;
+}
+
 /**
  * Ensures governance.event_type and integrity_hash exist before export.
  */

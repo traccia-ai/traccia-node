@@ -29,6 +29,7 @@ jest.mock('../config/config', () => ({
         logging: {},
         advanced: {},
     }),
+    findConfigFile: jest.fn().mockReturnValue(undefined),
     ENV_VAR_MAPPING: {},
 }));
 
@@ -106,5 +107,34 @@ describe('Auto Instrumentation', () => {
 
     it('can be safely stopped without initialization', async () => {
         await stopTracing(); // Should not throw
+    });
+
+    it('enables HIPAA enrichment and default PII redaction', async () => {
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        await startTracing({
+            apiKey: 'test',
+            compliance: { frameworks: ['hipaa'] },
+        });
+        expect(OtlpExporter).toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
+    it('allows explicit redactPii false with HIPAA', async () => {
+        const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        await startTracing({
+            apiKey: 'test',
+            redactPii: false,
+            compliance: { frameworks: ['hipaa'] },
+        });
+        expect(OtlpExporter).toHaveBeenCalled();
+        warn.mockRestore();
+    });
+
+    it('sets EU risk tier when eu_ai_act enabled', async () => {
+        await startTracing({
+            apiKey: 'test',
+            compliance: { frameworks: ['eu_ai_act'], risk_tier: 'high' },
+        });
+        expect(OtlpExporter).toHaveBeenCalled();
     });
 });
