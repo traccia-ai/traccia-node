@@ -38,6 +38,7 @@ import {
 import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
 import { configureGovernance } from './governance/config';
+import { configurePrompts } from './prompts';
 
 let globalProvider: TracerProvider | null = null;
 let started = false;
@@ -92,6 +93,18 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     postBlockEndpoint: config.postBlockEndpoint,
     statusCacheTtlSeconds: config.statusCacheTtlSeconds,
   });
+
+  {
+    const envTtl = process.env.TRACCIA_PROMPT_CACHE_TTL_S;
+    const ttl =
+      config.promptCacheTtlS ??
+      (envTtl != null && envTtl !== '' ? Number(envTtl) : undefined);
+    configurePrompts({
+      cacheTtlS: ttl != null && !Number.isNaN(ttl) ? ttl : 60,
+      promptApiBase:
+        config.promptApiBase ?? process.env.TRACCIA_PROMPT_API_BASE ?? undefined,
+    });
+  }
 
   // overrides from argument 'config' take precedence
   const apiKey = config.apiKey || loadedConfig.tracing.api_key || '';

@@ -156,6 +156,13 @@ export interface SDKConfig {
   postBlockEndpoint?: string;
   /** Advanced: policy status cache TTL in seconds (default 60). */
   statusCacheTtlSeconds?: number;
+  /** Client cache TTL for loadPrompt in seconds (default 60). */
+  promptCacheTtlS?: number;
+  /**
+   * Advanced: host for prompt-runtime fetch when it differs from the traces endpoint.
+   * Hosted Traccia (`https://api.traccia.ai`) does not need this.
+   */
+  promptApiBase?: string;
 }
 
 /**

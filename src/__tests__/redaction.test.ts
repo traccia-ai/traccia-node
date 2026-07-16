@@ -75,6 +75,17 @@ describe('redactAttributes', () => {
     const result = redactAttributes({ prompt: 'test' });
     expect(result['governance.redaction_applied']).toBe(true);
   });
+
+  it('should allowlist traccia.prompt.* identity keys', () => {
+    const result = redactAttributes({
+      'traccia.prompt.name': 'support-reply',
+      'traccia.prompt.version': '3',
+      'llm.prompt': 'secret@example.com',
+    });
+    expect(result['traccia.prompt.name']).toBe('support-reply');
+    expect(result['traccia.prompt.version']).toBe('3');
+    expect(String(result['llm.prompt'])).toContain('[REDACTED_EMAIL]');
+  });
 });
 
 describe('applyRedactionToSpan', () => {
