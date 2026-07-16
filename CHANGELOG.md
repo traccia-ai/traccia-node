@@ -5,7 +5,17 @@ All notable changes to the Traccia SDK for TypeScript will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.6] - 2026-07-13
+## [0.1.8] - 2026-07-16
+
+### Added
+- `loadPrompt` / `prefetchPrompts` with TTL cache (~60s), stale-while-revalidate, and explicit fallback
+- `{{var}}` compile helpers (`LoadedPrompt.compile`) with shared golden fixtures
+- Auto span attributes `traccia.prompt.*` on compile (name, version, version_id, label, is_fallback)
+- `init({ promptCacheTtlS })` / `TRACCIA_PROMPT_CACHE_TTL_S` for cache TTL
+- `init({ promptApiBase })` / `TRACCIA_PROMPT_API_BASE` when prompt-runtime host differs from the traces host (advanced deployments only)
+- Redaction allowlist so `traccia.prompt.*` identity keys are not wiped by `"prompt"` substring matching
+
+## [0.1.7] - 2026-07-13
 
 ### Added
 - HIPAA governance attributes (`hipaa.*`) and PHI soft-warning / redaction support for healthcare workloads

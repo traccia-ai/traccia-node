@@ -36,6 +36,26 @@ export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
   "medication",
 ]);
 
+/** Prompt identity attrs contain substring "prompt" but must not be redacted. */
+export const PROMPT_IDENTITY_KEY_PREFIX = "traccia.prompt.";
+
+function keyIsAllowlisted(key: string): boolean {
+  return key.toLowerCase().startsWith(PROMPT_IDENTITY_KEY_PREFIX);
+}
+
+function keyIsSensitive(key: string, fragments: Iterable<string>): boolean {
+  if (keyIsAllowlisted(key)) {
+    return false;
+  }
+  const lower = key.toLowerCase();
+  for (const fragment of fragments) {
+    if (lower.includes(fragment.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function redactString(text: string | null | undefined): string {
   if (!text || typeof text !== "string") return "";
   let result = text;
@@ -48,16 +68,6 @@ export function redactString(text: string | null | undefined): string {
   result = result.replace(SSN, "[REDACTED_SSN]");
   result = result.replace(MEDICARE, "[REDACTED_ID]");
   return result;
-}
-
-function keyIsSensitive(key: string, fragments: Iterable<string>): boolean {
-  const lower = key.toLowerCase();
-  for (const fragment of fragments) {
-    if (lower.includes(fragment.toLowerCase())) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function redactValue(
@@ -96,6 +106,10 @@ export function redactAttributes(
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(attrs)) {
+    if (keyIsAllowlisted(key)) {
+      out[key] = value;
+      continue;
+    }
     if (typeof value === "string" && (options?.redactAllStrings || keyIsSensitive(key, fragments))) {
       out[key] = redactString(value);
     } else {
