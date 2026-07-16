@@ -1,0 +1,46 @@
+{
+  "description": "F49 golden fixtures — {{var}} compile parity across Python and TypeScript",
+  "cases": [
+    {
+      "id": "simple_text",
+      "type": "text",
+      "body": { "text": "Hello {{name}}" },
+      "variables": { "name": "Ada" },
+      "expected": { "text": "Hello Ada" },
+      "warn_extras": []
+    },
+    {
+      "id": "chat_multi",
+      "type": "chat",
+      "body": {
+        "messages": [
+          { "role": "system", "content": "You help with {{topic}}" },
+          { "role": "user", "content": "{{question}}" }
+        ]
+      },
+      "variables": { "topic": "billing", "question": "Why was I charged?" },
+      "expected": {
+        "messages": [
+          { "role": "system", "content": "You help with billing" },
+          { "role": "user", "content": "Why was I charged?" }
+        ]
+      },
+      "warn_extras": []
+    },
+    {
+      "id": "missing_required",
+      "type": "text",
+      "body": { "text": "Hi {{name}}" },
+      "variables": {},
+      "error": "Missing required variables: name"
+    },
+    {
+      "id": "unknown_extras_warn",
+      "type": "text",
+      "body": { "text": "Hi {{name}}" },
+      "variables": { "name": "Ada", "unused": "x" },
+      "expected": { "text": "Hi Ada" },
+      "warn_extras": ["unused"]
+    }
+  ]
+}
