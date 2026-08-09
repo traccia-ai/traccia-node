@@ -5,6 +5,7 @@
 import { getCurrentSpan } from '../context/context';
 import { compileBody, CompileError } from './compile';
 
+export const ATTR_PROMPT_ID = 'traccia.prompt.id';
 export const ATTR_PROMPT_NAME = 'traccia.prompt.name';
 export const ATTR_PROMPT_VERSION = 'traccia.prompt.version';
 export const ATTR_PROMPT_VERSION_ID = 'traccia.prompt.version_id';
@@ -21,6 +22,7 @@ export interface LoadedPromptOptions {
   name: string;
   type: string;
   body: Record<string, unknown>;
+  id?: string | null;
   version?: number | null;
   versionId?: string | null;
   label?: string | null;
@@ -35,6 +37,7 @@ export class LoadedPrompt {
   readonly name: string;
   readonly type: string;
   readonly body: Record<string, unknown>;
+  readonly id: string | null | undefined;
   readonly version: number | null | undefined;
   readonly versionId: string | null | undefined;
   readonly label: string | null | undefined;
@@ -48,6 +51,7 @@ export class LoadedPrompt {
     this.name = opts.name;
     this.type = opts.type;
     this.body = { ...(opts.body || {}) };
+    this.id = opts.id;
     this.version = opts.version;
     this.versionId = opts.versionId;
     this.label = opts.label;
@@ -66,6 +70,7 @@ export class LoadedPrompt {
       name: String(payload.name ?? ''),
       type: String(payload.type ?? 'text'),
       body: (payload.body as Record<string, unknown>) || {},
+      id: payload.id != null ? String(payload.id) : null,
       version: payload.version as number | undefined,
       versionId: payload.version_id != null ? String(payload.version_id) : null,
       label: payload.label as string | undefined,
@@ -96,6 +101,7 @@ export class LoadedPrompt {
       name,
       type: fbType,
       body,
+      id: fallback.id != null ? String(fallback.id) : null,
       version: fallback.version as number | undefined,
       versionId: fallback.version_id as string | undefined,
       label: label ?? (fallback.label as string | undefined),
@@ -123,6 +129,7 @@ export class LoadedPrompt {
 
   spanAttributes(): Record<string, unknown> {
     const attrs: Record<string, unknown> = { [ATTR_PROMPT_NAME]: this.name };
+    if (this.id) attrs[ATTR_PROMPT_ID] = this.id;
     if (this.version != null) attrs[ATTR_PROMPT_VERSION] = String(this.version);
     if (this.versionId) attrs[ATTR_PROMPT_VERSION_ID] = this.versionId;
     if (this.label) attrs[ATTR_PROMPT_LABEL] = this.label;
