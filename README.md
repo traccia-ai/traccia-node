@@ -25,6 +25,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 - **W3C Trace Context**: Native distributed tracing header propagation.
 - **Governance & Policies**: Trace evidence enrichment, `disclosure()`, lifecycle hooks, and runtime `govern()` policy enforcement.
 - **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
+- **Prompt Management**: `loadPrompt` / `prefetchPrompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity.
 
 ---
 
@@ -57,6 +58,33 @@ class Service {
 const service = new Service();
 await service.doWork('hello');
 ```
+
+### Load a versioned prompt
+
+Fetch prompts from your Traccia library by name and deploy label. Compiling fills `{{variables}}` and stamps the active span with prompt identity.
+
+```typescript
+import { init, observe, loadPrompt, prefetchPrompts } from '@traccia/sdk';
+
+await init({ apiKey: '...', promptCacheTtlS: 60 });
+await prefetchPrompts(['support-reply']); // optional warm-up
+
+const reply = observe({ type: 'llm' })(async (question: string) => {
+  const prompt = await loadPrompt({
+    name: 'support-reply',
+    label: 'production',
+    fallback: {
+      type: 'chat',
+      messages: [{ role: 'system', content: 'You are a helpful assistant.' }],
+    },
+  });
+  const messages = prompt.compile({ question });
+  // pass messages to your LLM client
+  return messages;
+});
+```
+
+Requires the [Traccia platform](https://app.traccia.ai): create a workspace API key under **Settings → API Keys**. Tracing and prompt fetch use the same key and default to `https://api.traccia.ai`. Pass an explicit `fallback` so agents can still run if a fetch fails. See [Prompts in the SDK](https://traccia.ai/docs/sdk/prompts).
 
 ### Integration with LLMs (LangChain)
 
@@ -100,8 +128,8 @@ This creates a template config file with the following structure:
 
 ```toml
 [tracing]
-# Endpoint URL for OTLP trace ingestion
-endpoint = "http://localhost:8000/v2/traces"
+# Endpoint URL for OTLP trace ingestion (Traccia platform default)
+endpoint = "https://api.traccia.ai/v2/traces"
 
 # Flush interval for batching spans (in ms)
 flush_interval = 5000
@@ -133,7 +161,7 @@ openai = true
 Configuration can also be provided via standard environment variables:
 
 - `TRACCIA_API_KEY`: API Key for ingestion authentication.
-- `TRACCIA_ENDPOINT`: The OTLP endpoint (e.g., `http://localhost:8000/v2/traces`).
+- `TRACCIA_ENDPOINT`: The OTLP endpoint (default: `https://api.traccia.ai/v2/traces`).
 - `TRACCIA_AGENT_NAME`: The name of the agent tracing execution.
 - `TRACCIA_ENV`: The environment (e.g., `development`, `production`).
 

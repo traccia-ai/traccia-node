@@ -147,7 +147,20 @@ export {
   redactAttributes,
   applyRedactionToSpan,
   DEFAULT_SENSITIVE_KEY_FRAGMENTS,
+  PROMPT_IDENTITY_KEY_PREFIX,
 } from './redaction';
+
+// Prompt runtime 
+export {
+  loadPrompt,
+  prefetchPrompts,
+  configurePrompts,
+  resetPromptCache,
+  LoadedPrompt,
+  CompileError,
+  PromptFetchError,
+} from './prompts';
+export type { LoadPromptOptions, PromptMessage } from './prompts';
 
 // Metrics
 export {
@@ -190,12 +203,15 @@ import { govern } from './governance/govern';
 import { setSessionId, setUserId, setTenantId, setProjectId } from './config/runtime-config';
 import { getCurrentSpan } from './context/context';
 import { injectHttpHeaders, extractHttpHeaders } from './context';
+import { loadPrompt, prefetchPrompts } from './prompts';
 
 export const Traccia = {
   init,
   getTracer,
   observe,
   govern,
+  loadPrompt,
+  prefetchPrompts,
   setSessionId,
   setUserId,
   setTenantId,
