@@ -213,6 +213,7 @@ describe('LoadedPrompt.compile', () => {
   it('compiles text prompts and warns on extras', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const prompt = LoadedPrompt.fromPayload({
+      id: 'pid-1',
       name: 'greet',
       type: 'text',
       version: 2,
@@ -224,6 +225,7 @@ describe('LoadedPrompt.compile', () => {
     expect(prompt.messages).toBeUndefined();
     expect(prompt.compile({ name: 'Ada', unused: 1 })).toBe('Hi Ada');
     expect(warn).toHaveBeenCalled();
+    expect(prompt.spanAttributes()['traccia.prompt.id']).toBe('pid-1');
     expect(prompt.spanAttributes()['traccia.prompt.version']).toBe('2');
     expect(prompt.spanAttributes()['traccia.prompt.label']).toBe('latest');
     warn.mockRestore();
