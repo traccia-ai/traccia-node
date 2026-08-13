@@ -204,6 +204,10 @@ import { setSessionId, setUserId, setTenantId, setProjectId } from './config/run
 import { getCurrentSpan } from './context/context';
 import { injectHttpHeaders, extractHttpHeaders } from './context';
 import { loadPrompt, prefetchPrompts } from './prompts';
+import { evaluate } from './eval';
+
+export { evaluate, EvaluateResult, EvaluateError, BUILTIN_SCORERS, runBuiltinScorer } from './eval';
+export type { EvaluateOptions, ScorerSpec, DataSpec } from './eval';
 
 export const Traccia = {
   init,
@@ -212,6 +216,7 @@ export const Traccia = {
   govern,
   loadPrompt,
   prefetchPrompts,
+  evaluate,
   setSessionId,
   setUserId,
   setTenantId,

@@ -5,6 +5,14 @@ All notable changes to the Traccia SDK for TypeScript will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-08-14
+
+### Added
+- `evaluate()` for offline experiments (platform dataset, local+persist, local-only)
+- Eval-runtime client; local built-in scorers (`exact_match`, `contains`, `json_valid`); platform judge/code via server score
+- Eval span attrs (`traccia.experiment.*`, `traccia.eval.source`, `traccia.dataset.*`) with redaction allowlist
+- `result.summary()`, `result.url`, progress `N/M`, per-item error isolation, default persist and maxConcurrency 10
+
 ## [0.1.8] - 2026-07-16
 
 ### Added
