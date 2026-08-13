@@ -38,9 +38,16 @@ export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
 
 /** Prompt identity attrs contain substring "prompt" but must not be redacted. */
 export const PROMPT_IDENTITY_KEY_PREFIX = "traccia.prompt.";
+const EVAL_ALLOWLIST_PREFIXES = [
+  "traccia.prompt.",
+  "traccia.experiment.",
+  "traccia.eval.",
+  "traccia.dataset.",
+];
 
 function keyIsAllowlisted(key: string): boolean {
-  return key.toLowerCase().startsWith(PROMPT_IDENTITY_KEY_PREFIX);
+  const lower = key.toLowerCase();
+  return EVAL_ALLOWLIST_PREFIXES.some((p) => lower.startsWith(p));
 }
 
 function keyIsSensitive(key: string, fragments: Iterable<string>): boolean {

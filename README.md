@@ -8,7 +8,7 @@
 
 **Production-ready distributed tracing for AI agents and LLM applications**
 
-Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observability and tracing of AI agents, LLM applications, and complex distributed systems. Built on OpenTelemetry standards with specialized instrumentation for AI workloads.
+Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observability, evaluation, and tracing of AI agents, LLM applications, and complex distributed systems. Built on OpenTelemetry standards with specialized instrumentation for AI workloads.
 
 ---
 
@@ -26,6 +26,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 - **Governance & Policies**: Trace evidence enrichment, `disclosure()`, lifecycle hooks, and runtime `govern()` policy enforcement.
 - **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
 - **Prompt Management**: `loadPrompt` / `prefetchPrompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity.
+- **Offline Evaluation**: `evaluate()` runs a task and scorers over a dataset and saves an experiment you can open, compare, and attach on promote.
 
 ---
 
@@ -85,6 +86,39 @@ const reply = observe({ type: 'llm' })(async (question: string) => {
 ```
 
 Requires the [Traccia platform](https://app.traccia.ai): create a workspace API key under **Settings → API Keys**. Tracing and prompt fetch use the same key and default to `https://api.traccia.ai`. Pass an explicit `fallback` so agents can still run if a fetch fails. See [Prompts in the SDK](https://traccia.ai/docs/sdk/prompts).
+
+### Run an experiment
+
+`evaluate()` runs a task and scorers over a dataset. By default the run is saved as an experiment you can open in the app under **Evaluate → Experiments**, compare against other runs, and attach when you promote a prompt. Use the same workspace API key as tracing and `loadPrompt`.
+
+```typescript
+import { init, evaluate, loadPrompt } from "@traccia/sdk";
+
+await init({ apiKey: "..." });
+
+const prompt = await loadPrompt({ name: "support-reply", label: "production" });
+
+const result = await evaluate({
+  name: "support-reply-v3",
+  data: "support-golden", // platform dataset name or UUID
+  task: async (inp) => {
+    const messages = prompt.compile(inp);
+    return callModel(messages);
+  },
+  scorers: ["exact_match"], // builtins, platform names/ids, or functions
+  prompt: "support-reply",  // labels the experiment cell with this prompt
+});
+console.log(result.summary());
+console.log(result.url);
+```
+
+- **Persist is on by default.** Set `persist: false` for a local-only loop (no experiment URL).
+- **Inline rows** work as `[{ input: { ... }, expected: "..." }]`. With persist on, Traccia still saves a full experiment (helper datasets named `sdk-eval/...` are hidden on **Evaluate → Datasets** unless you turn on **Show SDK-Created**).
+- **Builtins** run in-process: `exact_match`, `contains`, `json_valid`. Mix in platform scorers (LLM-as-judge, code) by name or UUID. Pass `providerKeys` for judges.
+- **One throwing row does not abort the run.** That cell records `error`; other items still score. Configuration and API failures raise `EvaluateError`.
+- The task always receives the row's `input` object only. Wrapper fields are camelCase (`experimentId`, `persistError`); row payloads stay snake_case.
+
+See [Evaluate in the SDK](https://traccia.ai/docs/sdk/evaluate) and the walkthrough [Run Experiments From Code](https://traccia.ai/docs/guides/sdk-evaluate).
 
 ### Integration with LLMs (LangChain)
 
@@ -201,6 +235,24 @@ import { stopTracing } from '@traccia/sdk';
 // Flush buffered spans and shut down the provider safely
 await stopTracing();
 ```
+
+### `evaluate()` options
+
+`evaluate()` is async and takes one options object. Also available as `Traccia.evaluate`.
+
+| Option | Notes |
+|--------|--------|
+| `name` | Experiment name (required) |
+| `data` | Dataset name/UUID, or inline rows `{ input, expected, metadata }` (`expected_output` aliases `expected`) |
+| `task` | `(input) => output`. Always receives `input` only. Async is awaited |
+| `scorers` | Builtin ids `exact_match`, `contains`, `json_valid`; platform names/ids; and/or functions |
+| `prompt` | Optional prompt name for version ids and cell label (otherwise `Task`) |
+| `maxConcurrency` | Parallel workers (default 10) |
+| `persist` | Create an experiment (default `true`) |
+| `providerKeys` | BYO keys for platform LLM-as-judge |
+| `progress` | Print `N/M` to stderr (default `true`) |
+
+Returns `EvaluateResult` with `rows`, `aggregates`, `summary()`, `url`, `experimentId`, `datasetId`, `errors`, `persistError`. Empty data, bad config, and dataset/scorer API failures throw `EvaluateError`. Full reference: [Evaluate in the SDK](https://traccia.ai/docs/sdk/evaluate).
 
 ---
 
