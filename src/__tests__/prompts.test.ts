@@ -289,28 +289,40 @@ describe('prompt HTTP client', () => {
   });
 
   it('resolveCredentials prefers overrides and env', () => {
-    expect(() => resolveCredentials()).toThrow(PromptFetchError);
-    expect(
-      resolveCredentials({
-        apiKey: 'tr_x',
-        endpoint: 'https://api.traccia.ai/v2/traces',
-      }).baseUrl,
-    ).toBe('https://api.traccia.ai');
-    setPromptApiBase('https://custom.example/');
-    expect(
-      resolveCredentials({
-        apiKey: 'tr_x',
-        endpoint: 'https://api.traccia.ai/v2/traces',
-      }).baseUrl,
-    ).toBe('https://custom.example');
-    setPromptApiBase(null);
-    process.env.TRACCIA_PROMPT_API_BASE = 'https://from-env.example';
-    expect(
-      resolveCredentials({
-        apiKey: 'tr_x',
-        endpoint: 'https://api.traccia.ai/v2/traces',
-      }).baseUrl,
-    ).toBe('https://from-env.example');
+    const prevKey = process.env.TRACCIA_API_KEY;
+    const prevBase = process.env.TRACCIA_PROMPT_API_BASE;
+    delete process.env.TRACCIA_API_KEY;
+    delete process.env.TRACCIA_PROMPT_API_BASE;
+    try {
+      expect(() => resolveCredentials()).toThrow(PromptFetchError);
+      expect(
+        resolveCredentials({
+          apiKey: 'tr_x',
+          endpoint: 'https://api.traccia.ai/v2/traces',
+        }).baseUrl,
+      ).toBe('https://api.traccia.ai');
+      setPromptApiBase('https://custom.example/');
+      expect(
+        resolveCredentials({
+          apiKey: 'tr_x',
+          endpoint: 'https://api.traccia.ai/v2/traces',
+        }).baseUrl,
+      ).toBe('https://custom.example');
+      setPromptApiBase(null);
+      process.env.TRACCIA_PROMPT_API_BASE = 'https://from-env.example';
+      expect(
+        resolveCredentials({
+          apiKey: 'tr_x',
+          endpoint: 'https://api.traccia.ai/v2/traces',
+        }).baseUrl,
+      ).toBe('https://from-env.example');
+    } finally {
+      if (prevKey === undefined) delete process.env.TRACCIA_API_KEY;
+      else process.env.TRACCIA_API_KEY = prevKey;
+      if (prevBase === undefined) delete process.env.TRACCIA_PROMPT_API_BASE;
+      else process.env.TRACCIA_PROMPT_API_BASE = prevBase;
+      setPromptApiBase(null);
+    }
   });
 
   it('fetchPromptRuntime handles success, 404, 500, and network errors', async () => {

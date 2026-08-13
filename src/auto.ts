@@ -43,6 +43,11 @@ import { configurePrompts } from './prompts';
 let globalProvider: TracerProvider | null = null;
 let started = false;
 
+/** True after a successful init()/startTracing() (OTLP export configured). */
+export function isTracingStarted(): boolean {
+  return started;
+}
+
 /**
  * Get the global tracer provider.
  */

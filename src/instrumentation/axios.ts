@@ -49,6 +49,18 @@ export function patchAxios(): boolean {
                 const url = config.url as string | undefined;
                 const status = (response as Record<string, unknown>).status as number | undefined;
 
+                // Skip Traccia platform bookkeeping / OTLP (same policy as Python requests patch)
+                const urlStr = String(url || '');
+                if (
+                    urlStr.includes('/api/v1/eval-runtime/') ||
+                    urlStr.includes('/v2/traces') ||
+                    urlStr.includes('/v1/traces') ||
+                    urlStr.includes('/v2/metrics') ||
+                    urlStr.includes('/v1/metrics')
+                ) {
+                    return response;
+                }
+
                 tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
                     span.setAttribute('span.type', 'TOOL');
                     span.setAttribute('http.method', method);
