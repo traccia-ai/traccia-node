@@ -20,6 +20,9 @@ async function ensureEvalTracing(opts: {
     if (!process.env.TRACCIA_AGENT_ID) {
       process.env.TRACCIA_AGENT_ID = 'sdk-evaluate';
     }
+    if (!process.env.TRACCIA_AGENT_NAME && !process.env.AGENT_DASHBOARD_AGENT_NAME) {
+      process.env.TRACCIA_AGENT_NAME = 'SDK Evaluate';
+    }
     await init({
       apiKey: opts.apiKey,
       promptApiBase: opts.promptApiBase,
