@@ -5,6 +5,15 @@ All notable changes to the Traccia SDK for TypeScript will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Gemini (`@google/genai`) auto-instrumentation: `patchGemini()` / `wrapGeminiInteractionsCreate()` for `client.interactions.create` (Interactions API only, `@google/genai` `>=2.9.0`, tested against `2.17.1`)
+- Usage read directly from provider `usage.total_*` fields (`total_input_tokens`, `total_output_tokens`, `total_thought_tokens`, `total_cached_tokens`, `total_tool_use_tokens`, `total_tokens`) — never synthesized from input+output, so thinking/cache/tool-use tokens aren't dropped; `total_tokens` falls back to input+output only when the provider omits it
+- `llm.previous_interaction_id` captured for multi-turn calls; `llm.model` falls back to the response's `model` when the request omits it
+- Streaming (`stream: true`) calls: span is created and tagged `llm.streaming: true`, but usage/completion population is intentionally skipped since `create()` resolves with a `Stream` object before the model has produced output
+- Soft-fails (no crash) when `@google/genai` isn't installed
+
 ## [0.1.9] - 2026-08-14
 
 ### Added

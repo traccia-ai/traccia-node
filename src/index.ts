@@ -180,6 +180,8 @@ export {
   wrapOpenAIResponsesCreate,
   patchAnthropic,
   wrapAnthropicCreate,
+  patchGemini,
+  wrapGeminiInteractionsCreate,
   patchAxios,
   createTracedAxios,
   patchFetch,
