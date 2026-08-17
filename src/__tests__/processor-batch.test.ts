@@ -138,4 +138,65 @@ describe('BatchSpanProcessor', () => {
         // Just succeeds silently
         await processor.shutdown();
     });
+
+    it('drains every queued span even when a real (slow) export is in flight', async () => {
+        // Regression test: with maxExportBatchSize 1 and a slow exporter,
+        // forceFlush/shutdown must not bail out early just because an
+        // export is currently in progress - it must wait for it and keep
+        // draining until the queue is truly empty.
+        jest.useRealTimers();
+
+        let resolveFirstExport: () => void = () => {};
+        const firstExportGate = new Promise<void>((resolve) => {
+            resolveFirstExport = resolve;
+        });
+
+        const exportedBatches: ISpan[][] = [];
+        let callCount = 0;
+        const slowExporter: jest.Mocked<ISpanExporter> = {
+            export: jest.fn(async (spans: ISpan[]) => {
+                callCount += 1;
+                if (callCount === 1) {
+                    // Hold the first export open until we've enqueued the rest.
+                    await firstExportGate;
+                }
+                exportedBatches.push(spans);
+                return true;
+            }),
+            shutdown: jest.fn().mockResolvedValue(undefined),
+        };
+
+        const processor = new BatchSpanProcessor({
+            exporter: slowExporter,
+            maxExportBatchSize: 1,
+            scheduleDelayMs: 20,
+        });
+
+        const spans = Array.from({ length: 7 }, (_, i) => ({
+            _id: i,
+            context: { traceFlags: 1 },
+        })) as unknown as ISpan[];
+
+        // First span triggers the background timer's export (kept open by the gate).
+        processor.onEnd(spans[0]);
+        await new Promise((r) => setTimeout(r, 40));
+
+        // Remaining spans queue up while the first export is still in flight.
+        for (let i = 1; i < spans.length; i++) {
+            processor.onEnd(spans[i]);
+        }
+
+        // Let the first export finish, then force a full flush.
+        resolveFirstExport();
+        await processor.forceFlush(2000);
+        await processor.shutdown();
+
+        const allExported = exportedBatches.flat();
+        expect(allExported).toHaveLength(7);
+        expect(allExported.map((s: any) => s._id).sort((a, b) => a - b)).toEqual([
+            0, 1, 2, 3, 4, 5, 6,
+        ]);
+
+        jest.useFakeTimers();
+    });
 });

@@ -31,7 +31,7 @@ export class BatchSpanProcessor implements ISpanProcessor {
   private queue: ISpan[] = [];
   private _shutdown = false;
   private timer?: NodeJS.Timeout;
-  private processing = false;
+  private inFlight: Promise<void> | null = null;
 
   constructor(options: {
     exporter?: ISpanExporter;
@@ -68,7 +68,9 @@ export class BatchSpanProcessor implements ISpanProcessor {
   }
 
   /**
-   * Force flush pending spans.
+   * Force flush pending spans. Keeps draining the queue (waiting for any
+   * export already in flight rather than treating "busy" as "empty") until
+   * the queue is truly empty or the deadline is exceeded.
    */
   async forceFlush(timeout?: number): Promise<void> {
     const deadline = timeout ? Date.now() + timeout : undefined;
@@ -76,23 +78,27 @@ export class BatchSpanProcessor implements ISpanProcessor {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const flushed = await this.flushOnce(deadline);
-      if (!flushed || (deadline && Date.now() >= deadline)) {
+      if (!flushed) {
+        break;
+      }
+      if (deadline && Date.now() >= deadline) {
         break;
       }
     }
   }
 
   /**
-   * Shutdown the processor.
+   * Shutdown the processor. Fully drains the queue before tearing down the
+   * background timer/exporter, so spans enqueued right before shutdown are
+   * not stranded.
    */
   async shutdown(): Promise<void> {
     this._shutdown = true;
-    if (this.timer) {
-      if (this.timer) {
-        clearInterval(this.timer);
-      }
-    }
     await this.forceFlush();
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
     if (this.exporter) {
       await this.exporter.shutdown();
     }
@@ -113,13 +119,12 @@ export class BatchSpanProcessor implements ISpanProcessor {
   }
 
   /**
-   * Flush once (export one batch).
+   * Flush once (export one batch). Draining the queue is synchronous, so
+   * concurrent callers (the background timer and an explicit forceFlush)
+   * never grab the same spans twice; the actual export call is serialized
+   * via `this.inFlight` so exports still run one at a time.
    */
   private async flushOnce(deadline?: number): Promise<boolean> {
-    if (this.processing) {
-      return false;
-    }
-
     if (deadline && Date.now() >= deadline) {
       return false;
     }
@@ -148,20 +153,36 @@ export class BatchSpanProcessor implements ISpanProcessor {
   }
 
   /**
-   * Export spans.
+   * Export spans. Chained onto `this.inFlight` so overlapping calls (e.g.
+   * the background timer firing while forceFlush is draining) run their
+   * exporter.export() calls one at a time instead of racing.
    */
   private async export(spans: ISpan[]): Promise<void> {
     if (!this.exporter) {
       return;
     }
 
-    this.processing = true;
-    try {
-      await this.exporter.export(spans);
-    } catch {
-      // Export errors are swallowed for resilience
-    } finally {
-      this.processing = false;
+    const previous = this.inFlight ?? Promise.resolve();
+
+    const run = previous
+      .catch(() => {
+        // Ignore failures from the previous export in the chain; each
+        // export's own errors are handled below.
+      })
+      .then(async () => {
+        try {
+          await this.exporter!.export(spans);
+        } catch {
+          // Export errors are swallowed for resilience
+        }
+      });
+
+    this.inFlight = run;
+    await run;
+
+    // Only clear inFlight if nothing newer has chained on since.
+    if (this.inFlight === run) {
+      this.inFlight = null;
     }
   }
 
