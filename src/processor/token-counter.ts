@@ -89,7 +89,7 @@ function syncDerivedUsageAttrs(span: ISpan, attrs: Record<string, unknown>): voi
     attrs['output_tokens'] = completion;
     attrs['gen_ai.usage.output_tokens'] = completion;
   }
-  if (prompt != null || completion != null) {
+  if (attrs['llm.usage.total_tokens'] == null && (prompt != null || completion != null)) {
     attrs['llm.usage.total_tokens'] = (prompt ?? 0) + (completion ?? 0);
   }
 

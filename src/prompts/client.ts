@@ -5,6 +5,8 @@
 import axios, { AxiosInstance } from 'axios';
 import { loadConfig } from '../config/config';
 import { DEFAULT_ENDPOINT } from '../exporter/http-exporter';
+import { getTracer } from '../auto';
+import { ISpan } from '../types';
 
 const DEFAULT_RUNTIME_PATH = '/api/v1/prompt-runtime/prompts/{name}';
 
@@ -90,29 +92,61 @@ export async function fetchPromptRuntime(
     params.label = opts?.label || 'production';
   }
   const url = `${baseUrl}${DEFAULT_RUNTIME_PATH.replace('{name}', encodeURIComponent(name))}`;
+
+  const doFetch = async (span?: ISpan) => {
+    if (span) {
+      span.setAttribute('span.type', 'TOOL');
+      span.setAttribute('http.method', 'GET');
+      span.setAttribute('http.url', url);
+      try {
+        const parsed = new URL(url);
+        span.setAttribute('http.host', parsed.host);
+        span.setAttribute('http.path', parsed.pathname);
+      } catch { /* relative */ }
+    }
+    try {
+      const resp = await httpClient.get(url, {
+        params,
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+        timeout: opts?.timeout ?? 5000,
+        validateStatus: () => true,
+      });
+      if (span) span.setAttribute('http.status_code', resp.status);
+      if (resp.status === 404) {
+        throw new PromptFetchError(`Prompt '${name}' not found`);
+      }
+      if (resp.status >= 400) {
+        const detail =
+          typeof resp.data === 'string'
+            ? resp.data.slice(0, 200)
+            : JSON.stringify(resp.data).slice(0, 200);
+        throw new PromptFetchError(`Prompt fetch failed (${resp.status}): ${detail}`);
+      }
+      return {
+        payload: resp.data as Record<string, unknown>,
+        etag: resp.headers?.etag as string | undefined,
+      };
+    } catch (err) {
+      if (err instanceof PromptFetchError) throw err;
+      throw new PromptFetchError(`Failed to fetch prompt '${name}': ${String(err)}`);
+    }
+  };
+
   try {
-    const resp = await httpClient.get(url, {
-      params,
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-      timeout: opts?.timeout ?? 5000,
-      validateStatus: () => true,
-    });
-    if (resp.status === 404) {
-      throw new PromptFetchError(`Prompt '${name}' not found`);
-    }
-    if (resp.status >= 400) {
-      const detail =
-        typeof resp.data === 'string'
-          ? resp.data.slice(0, 200)
-          : JSON.stringify(resp.data).slice(0, 200);
-      throw new PromptFetchError(`Prompt fetch failed (${resp.status}): ${detail}`);
-    }
-    return {
-      payload: resp.data as Record<string, unknown>,
-      etag: resp.headers?.etag as string | undefined,
-    };
+    const tracer = getTracer('prompts');
+    return await tracer.startActiveSpan(
+      'http.client',
+      async (span: ISpan) => {
+        try {
+          return await doFetch(span);
+        } finally {
+          span.end();
+        }
+      },
+      { attributes: { 'span.type': 'TOOL' } },
+    );
   } catch (err) {
     if (err instanceof PromptFetchError) throw err;
-    throw new PromptFetchError(`Failed to fetch prompt '${name}': ${String(err)}`);
+    return doFetch();
   }
 }

@@ -24,7 +24,7 @@ jest.mock('../config/config', () => ({
     loadConfig: jest.fn().mockReturnValue({
         tracing: { use_otlp: true },
         exporters: { enable_console: false },
-        instrumentation: {},
+        instrumentation: { enable_patching: false },
         rate_limiting: {},
         logging: {},
         advanced: {},
