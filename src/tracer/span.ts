@@ -90,17 +90,20 @@ export class Span implements ISpan {
 
   /**
    * End the span.
+   *
+   * Enrichment processors run before the span is marked ended so they can still
+   * call setAttribute (Python parity). Export processors in the same list see
+   * the enriched attributes. After this returns, the span is immutable.
    */
   end(): void {
     if (this.ended) return;
-    this.ended = true;
     this.endTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
-    
-    // Notify provider of span end
+
     if (this.provider) {
       this.provider.notifySpanEnd(this);
     }
-    
+
+    this.ended = true;
     this.otelSpan.end();
   }
 

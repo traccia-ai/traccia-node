@@ -9,10 +9,36 @@ import { SpanStatus, ISpan } from '../types';
 
 let _patched = false;
 
+function shouldSkipHttp(url: string): boolean {
+    return [
+        '/v1/traces',
+        '/v2/traces',
+        '/api/v1/traces',
+        '/api/v2/traces',
+        '/v1/metrics',
+        '/v2/metrics',
+        '/api/v1/metrics',
+        '/api/v2/metrics',
+        '/api/v1/eval-runtime/',
+        '/api/v1/prompt-runtime/',
+    ].some((path) => url.includes(path));
+}
+
+function joinUrl(base: string, path: string): string {
+    if (!base) return path;
+    if (!path) return base;
+    try {
+        return new (globalThis.URL || URL)(path, base).toString();
+    } catch {
+        return `${base.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+    }
+}
+
 /**
  * Patch Axios for HTTP request tracing.
  *
- * @returns true if patched successfully, false otherwise
+ * Wraps Axios.prototype.request so axios.create() (used by loadPrompt) is
+ * traced as http.client. Falls back to default-instance interceptors.
  */
 export function patchAxios(): boolean {
     if (_patched) {
@@ -20,14 +46,76 @@ export function patchAxios(): boolean {
     }
 
     try {
-        // Dynamic import to avoid hard dependency
         // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-        const axios = require('axios');
-        if (!axios) {
+        const axiosMod = require('axios');
+        const axiosLib = axiosMod?.default || axiosMod;
+        const AxiosClass = axiosLib?.Axios || axiosMod?.Axios;
+        const proto = AxiosClass?.prototype;
+
+        if (proto && typeof proto.request === 'function') {
+            const originalRequest = proto.request as (...args: unknown[]) => Promise<unknown>;
+            proto.request = function tracedAxiosRequest(
+                this: { defaults?: { baseURL?: string } },
+                configOrUrl?: Record<string, unknown> | string,
+                maybeConfig?: Record<string, unknown>
+            ): Promise<unknown> {
+                const cfg = ((typeof configOrUrl === 'string' ? maybeConfig : configOrUrl) || {}) as {
+                    method?: string;
+                    url?: string;
+                    baseURL?: string;
+                };
+                const path = typeof configOrUrl === 'string' ? configOrUrl : (cfg.url || '');
+                const url = joinUrl(cfg.baseURL || this?.defaults?.baseURL || '', path);
+                if (shouldSkipHttp(url)) {
+                    return maybeConfig !== undefined
+                        ? originalRequest.call(this, configOrUrl, maybeConfig)
+                        : originalRequest.call(this, configOrUrl);
+                }
+                const method = String(cfg.method || (typeof configOrUrl === 'string' ? 'GET' : 'GET')).toUpperCase();
+                const tracer = getTracer('axios');
+                return Promise.resolve(
+                    tracer.startActiveSpan('http.client', async (span: ISpan) => {
+                        span.setAttribute('http.method', method);
+                        span.setAttribute('http.url', url);
+                        try {
+                            const parsed = new (globalThis.URL || URL)(url);
+                            span.setAttribute('http.host', parsed.host);
+                            span.setAttribute('http.path', parsed.pathname);
+                        } catch {
+                            /* relative url */
+                        }
+                        try {
+                            const response = (await (maybeConfig !== undefined
+                                ? originalRequest.call(this, configOrUrl, maybeConfig)
+                                : originalRequest.call(this, configOrUrl))) as { status?: number };
+                            if (response?.status !== undefined) {
+                                span.setAttribute('http.status_code', response.status);
+                            }
+                            return response;
+                        } catch (error) {
+                            const err = error as { response?: { status?: number }; message?: string };
+                            if (err?.response?.status !== undefined) {
+                                span.setAttribute('http.status_code', err.response.status);
+                            }
+                            if (error instanceof Error) {
+                                span.recordException(error);
+                                span.status = SpanStatus.ERROR;
+                                span.statusDescription = error.message;
+                            }
+                            throw error;
+                        }
+                    })
+                );
+            };
+            _patched = true;
+            return true;
+        }
+
+        if (!axiosLib?.interceptors?.request || !axiosLib?.interceptors?.response) {
             return false;
         }
 
-        const axiosInstance = axios.default || axios;
+        const axiosInstance = axiosLib;
 
         // Add request interceptor
         axiosInstance.interceptors.request.use(

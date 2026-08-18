@@ -39,6 +39,8 @@ import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
 import { configureGovernance } from './governance/config';
 import { configurePrompts } from './prompts';
+import { patchGemini } from './instrumentation/gemini';
+import { patchAxios } from './instrumentation/axios';
 
 let globalProvider: TracerProvider | null = null;
 let started = false;
@@ -289,6 +291,19 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   provider.addSpanProcessor(processor);
   registerShutdown(provider, processor);
+
+  if (loadedConfig.instrumentation.enable_patching !== false) {
+    try {
+      patchGemini();
+    } catch {
+      /* optional peer */
+    }
+    try {
+      patchAxios();
+    } catch {
+      /* optional peer */
+    }
+  }
 
   return provider;
 }

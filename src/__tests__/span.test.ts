@@ -74,4 +74,22 @@ describe('Span', () => {
     expect(span.attributes.foo).toBeUndefined();
     expect(span.events).toHaveLength(0);
   });
+
+  it('allows processors to set attributes during onEnd', () => {
+    provider.addSpanProcessor({
+      onEnd(span) {
+        span.setAttribute('span.type', 'TOOL');
+      },
+      shutdown() {},
+      forceFlush() {},
+    });
+
+    const tracer = provider.getTracer('test');
+    const span = tracer.startSpan('http.client', {
+      attributes: { 'http.url': 'https://example.com/prompts/x' },
+    });
+    span.end();
+
+    expect(span.attributes['span.type']).toBe('TOOL');
+  });
 });

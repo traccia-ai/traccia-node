@@ -99,6 +99,32 @@ describe('Gemini Instrumentation', () => {
             });
         });
 
+        it('wraps interactions.create when GoogleGenAI exposes it as a getter', () => {
+            jest.isolateModules(() => {
+                class Interactions {
+                    create = async () => ({});
+                }
+                class GoogleGenAI {
+                    get interactions() {
+                        return new Interactions();
+                    }
+                }
+
+                jest.doMock('@google/genai', () => ({ GoogleGenAI }), { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(fresh.patchGemini()).toBe(true);
+
+                const client = new GoogleGenAI();
+                expect(
+                    (client.interactions.create as { _agentTracePatched?: boolean })._agentTracePatched,
+                ).toBe(true);
+
+                jest.dontMock('@google/genai');
+            });
+        });
+
         it('should return true on subsequent calls without re-checking the module', () => {
             jest.isolateModules(() => {
                 jest.doMock('@google/genai', () => ({ GoogleGenAI: class {} }), { virtual: true });

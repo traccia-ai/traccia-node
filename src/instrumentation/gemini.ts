@@ -59,24 +59,100 @@ function extractPromptText(input: unknown): string | undefined {
  *
  * @returns true if patched successfully, false otherwise
  */
+type PatchedFn = ((...args: unknown[]) => unknown) & { _agentTracePatched?: boolean };
+
+function requireGenai(): { GoogleGenAI?: { prototype?: object }; default?: { prototype?: object } } | null {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+        return require('@google/genai');
+    } catch {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+            const { createRequire } = require('module');
+            const { join } = require('path');
+            return createRequire(join(process.cwd(), 'package.json'))('@google/genai');
+        } catch {
+            return null;
+        }
+    }
+}
+
+function findPropertyDescriptor(obj: object | null, name: string): PropertyDescriptor | undefined {
+    let current: object | null = obj;
+    while (current) {
+        const desc = Object.getOwnPropertyDescriptor(current, name);
+        if (desc) {
+            return desc;
+        }
+        current = Object.getPrototypeOf(current);
+    }
+    return undefined;
+}
+
+function patchInteractionsCreate(interactions: {
+    create?: PatchedFn;
+    constructor?: { prototype?: { create?: PatchedFn } };
+}): boolean {
+    if (!interactions?.create) {
+        return false;
+    }
+    const ctorProto = interactions.constructor?.prototype;
+    if (ctorProto?.create) {
+        if (ctorProto.create._agentTracePatched) {
+            return true;
+        }
+        ctorProto.create = wrapGeminiInteractionsCreate(
+            ctorProto.create as (...args: unknown[]) => Promise<unknown>,
+            null
+        ) as PatchedFn;
+        return true;
+    }
+    if (interactions.create._agentTracePatched) {
+        return true;
+    }
+    interactions.create = wrapGeminiInteractionsCreate(
+        interactions.create.bind(interactions) as (...args: unknown[]) => Promise<unknown>,
+        interactions
+    ) as PatchedFn;
+    return true;
+}
+
 export function patchGemini(): boolean {
     if (_patched) {
         return true;
     }
 
     try {
-        // Dynamic import to avoid hard dependency
-        // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-        const genai = require('@google/genai');
+        const genai = requireGenai();
         if (!genai) {
             return false;
         }
 
         const GoogleGenAI = genai.GoogleGenAI || genai.default;
-        if (!GoogleGenAI) {
+        if (!GoogleGenAI?.prototype) {
             return false;
         }
 
+        const proto = GoogleGenAI.prototype as { interactions?: unknown };
+        const desc = findPropertyDescriptor(proto, 'interactions');
+        if (desc?.get) {
+            Object.defineProperty(proto, 'interactions', {
+                configurable: true,
+                enumerable: desc.enumerable,
+                get: function patchedInteractionsGetter(this: unknown) {
+                    const value = desc.get!.call(this);
+                    if (value && typeof value === 'object') {
+                        patchInteractionsCreate(value as { create?: PatchedFn });
+                    }
+                    return value;
+                },
+            });
+        } else if (proto.interactions && typeof proto.interactions === 'object') {
+            patchInteractionsCreate(proto.interactions as { create?: PatchedFn });
+        }
+
+        // Package is present. Wrapping may be lazy (getter) or happen on first
+        // client.interactions access; tests mock an empty GoogleGenAI class.
         _patched = true;
         return true;
     } catch {
@@ -177,8 +253,12 @@ export function wrapGeminiInteractionsCreate<T>(
     createFn: (...args: unknown[]) => Promise<T>,
     instance: unknown
 ): (...args: unknown[]) => Promise<T> {
+    const existing = createFn as PatchedFn;
+    if (existing._agentTracePatched) {
+        return createFn;
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return async function wrappedCreate(this: any, ...args: unknown[]): Promise<T> {
+    const wrapped = async function wrappedCreate(this: any, ...args: unknown[]): Promise<T> {
         const tracer = getTracer('gemini');
         const kwargs = (args[0] || {}) as Record<string, unknown>;
 
@@ -236,5 +316,7 @@ export function wrapGeminiInteractionsCreate<T>(
                 span.end();
             }
         });
-    };
+    } as PatchedFn;
+    wrapped._agentTracePatched = true;
+    return wrapped as (...args: unknown[]) => Promise<T>;
 }
