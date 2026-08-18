@@ -7,6 +7,7 @@
 // LLM Client Instrumentation
 export { patchOpenAI, wrapOpenAICreate, patchOpenAIResponses, wrapOpenAIResponsesCreate } from './openai';
 export { patchAnthropic, wrapAnthropicCreate } from './anthropic';
+export { patchGemini, wrapGeminiInteractionsCreate } from './gemini';
 
 // HTTP Client Instrumentation
 export { patchAxios, createTracedAxios } from './axios';

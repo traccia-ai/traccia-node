@@ -105,4 +105,57 @@ describe('@observe Decorator', () => {
             expect(wrapped()).resolves.toBe('executed');
         });
     });
+
+    describe('type: "guardrail"', () => {
+        it('sets guardrail name/category attributes and guardrail.triggered from a boolean result', async () => {
+            const wrapped = observe({
+                type: 'guardrail',
+                guardrailName: 'pii-check',
+                guardrailCategory: 'privacy',
+            })(async () => true);
+
+            const result = await wrapped();
+
+            expect(result).toBe(true);
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('guardrail.name', 'pii-check');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('guardrail.category', 'privacy');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('guardrail.triggered', true);
+        });
+
+        it('does not set guardrail.triggered when the result is not a boolean', async () => {
+            const wrapped = observe({ type: 'guardrail' })(async () => 'not-a-boolean');
+
+            await wrapped();
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('guardrail.triggered', expect.anything());
+        });
+    });
+
+    describe('skipResult', () => {
+        it('does not set the result attribute when skipResult is true', async () => {
+            const wrapped = observe({ skipResult: true })(async () => 'the result');
+
+            await wrapped();
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('result', expect.anything());
+        });
+
+        it('falls back to String(result) when JSON.stringify throws (circular reference)', async () => {
+            const circular: any = {};
+            circular.self = circular;
+            const wrapped = observe({})(async () => circular);
+
+            await expect(wrapped()).resolves.toBe(circular);
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('result', expect.stringContaining('[object Object]'));
+        });
+    });
+
+    describe('observe() fallback for a non-matching decoration shape', () => {
+        it('returns the target unchanged', () => {
+            const target = { notAFunction: true };
+            const result = observe({})(target, undefined, undefined);
+
+            expect(result).toBe(target);
+        });
+    });
 });

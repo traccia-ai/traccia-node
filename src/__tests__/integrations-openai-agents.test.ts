@@ -179,6 +179,98 @@ describe('TracciaAgentsTracingProcessor', () => {
       processor.onSpanStart({ spanId: 'span-3', spanData: { type: 'custom_thing' } });
       expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.custom_thing', expect.any(Object));
     });
+
+    it('names a "custom" span type with its name', () => {
+      processor.onSpanStart({ spanId: 'custom-1', spanData: { type: 'custom', name: 'my-custom-span' } });
+      expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.custom.my-custom-span', expect.any(Object));
+    });
+
+    it('names function/handoff/response spans correctly', () => {
+      processor.onSpanStart({ spanId: 'fn-1', spanData: { type: 'function', name: 'search' } });
+      expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.tool.search', expect.any(Object));
+
+      processor.onSpanStart({ spanId: 'ho-1', spanData: { type: 'handoff' } });
+      expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.handoff', expect.any(Object));
+
+      processor.onSpanStart({ spanId: 'resp-1', spanData: { type: 'response' } });
+      expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.response', expect.any(Object));
+    });
+
+    it('extracts agent.tool.name for function spans', () => {
+      processor.onSpanStart({ spanId: 'fn-2', spanData: { type: 'function', name: 'calculator' } });
+      expect(mockTracer.startSpan).toHaveBeenCalledWith(
+        'agent.tool.calculator',
+        expect.objectContaining({ 'agent.tool.name': 'calculator' }),
+      );
+    });
+
+    it('sets agent.tool.input/output on function span end', () => {
+      processor.onSpanStart({ spanId: 'fn-3', spanData: { type: 'function', name: 'calc' } });
+      const mockSpanObj = mockTracer.startSpan.mock.results[0].value;
+
+      processor.onSpanEnd({
+        spanId: 'fn-3',
+        spanData: { type: 'function', name: 'calc', input: '2+2', output: '4' },
+      });
+
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('agent.tool.input', '2+2');
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('agent.tool.output', '4');
+    });
+
+    it('sets agent.response.id on response span end', () => {
+      processor.onSpanStart({ spanId: 'resp-2', spanData: { type: 'response' } });
+      const mockSpanObj = mockTracer.startSpan.mock.results[0].value;
+
+      processor.onSpanEnd({
+        spanId: 'resp-2',
+        spanData: { type: 'response', response: { id: 'resp-abc' } },
+      });
+
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('agent.response.id', 'resp-abc');
+    });
+
+    it('falls back to legacy prompt_tokens/completion_tokens usage field names', () => {
+      processor.onSpanStart({ spanId: 'gen-legacy', spanData: { type: 'generation' } });
+      const mockSpanObj = mockTracer.startSpan.mock.results[0].value;
+
+      processor.onSpanEnd({
+        spanId: 'gen-legacy',
+        spanData: { type: 'generation', usage: { prompt_tokens: 5, completion_tokens: 3 } },
+      });
+
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.usage.input_tokens', 5);
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.usage.output_tokens', 3);
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.usage.total_tokens', 8);
+    });
+
+    it('omits total_tokens when only one of input/output tokens is present', () => {
+      processor.onSpanStart({ spanId: 'gen-partial', spanData: { type: 'generation' } });
+      const mockSpanObj = mockTracer.startSpan.mock.results[0].value;
+
+      processor.onSpanEnd({
+        spanId: 'gen-partial',
+        spanData: { type: 'generation', usage: { input_tokens: 5 } },
+      });
+
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.usage.input_tokens', 5);
+      expect(mockSpanObj.setAttribute).not.toHaveBeenCalledWith('llm.usage.total_tokens', expect.anything());
+    });
+
+    it('falls back to String() when JSON.stringify throws for generation input/output', () => {
+      processor.onSpanStart({ spanId: 'gen-circular', spanData: { type: 'generation' } });
+      const mockSpanObj = mockTracer.startSpan.mock.results[0].value;
+
+      const circular: any = {};
+      circular.self = circular;
+
+      processor.onSpanEnd({
+        spanId: 'gen-circular',
+        spanData: { type: 'generation', input: circular, output: circular },
+      });
+
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.input', expect.stringContaining('[object Object]'));
+      expect(mockSpanObj.setAttribute).toHaveBeenCalledWith('llm.output', expect.stringContaining('[object Object]'));
+    });
   });
 
   describe('lifecycle', () => {

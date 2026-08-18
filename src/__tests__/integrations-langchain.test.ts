@@ -4,6 +4,15 @@
 
 import { TracciaCallbackHandler } from '../integrations/langchain-callback';
 import { startTracing, stopTracing } from '../auto';
+import { setCurrentSpan } from '../context/context';
+import {
+  HumanMessage,
+  AIMessage,
+  SystemMessage,
+  FunctionMessage,
+  ToolMessage,
+  ChatMessage,
+} from '@langchain/core/messages';
 
 class MockSpan {
   attributes: Record<string, any> = {};
@@ -169,6 +178,30 @@ describe('TracciaCallbackHandler', () => {
     });
   });
 
+  describe('handleChainStart BaseMessage-array normalization', () => {
+    it('normalizes inputs.input when it is an array of BaseMessage', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+
+      await handler.handleChainStart(chain, { input: [new HumanMessage('hi')] }, 'input-array-run');
+
+      const span = (handler as any)['runMap'].get('input-array-run');
+      expect(span.attributes.input).toEqual([{ role: 'user', content: 'hi' }]);
+    });
+
+    it('normalizes inputs.messages when it is an array of BaseMessage', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+
+      await handler.handleChainStart(chain, { messages: [new SystemMessage('sys')] }, 'messages-array-run');
+
+      const span = (handler as any)['runMap'].get('messages-array-run');
+      expect(span.attributes.input).toEqual([{ role: 'system', content: 'sys' }]);
+    });
+  });
+
   describe('handleChainEnd', () => {
     it('should end chain span and record output', async () => {
       const handler = new TracciaCallbackHandler();
@@ -181,6 +214,18 @@ describe('TracciaCallbackHandler', () => {
       await handler.handleChainEnd(output, 'chain-4');
 
       expect((handler as any)['runMap'].has('chain-4')).toBe(false);
+    });
+
+    it('normalizes outputs.messages when it is an array of BaseMessage', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+      await handler.handleChainStart(chain, {}, 'chain-msg-out');
+
+      const span = (handler as any)['runMap'].get('chain-msg-out');
+      await handler.handleChainEnd({ messages: [new AIMessage('done')] }, 'chain-msg-out');
+
+      expect(span.attributes.output).toEqual({ messages: [{ role: 'assistant', content: 'done' }] });
     });
   });
 
@@ -422,10 +467,488 @@ describe('TracciaCallbackHandler', () => {
 
     it('should handle unavailable tracer gracefully', async () => {
       const handler = new TracciaCallbackHandler();
-      
+
       // Should not throw even if operations fail
       const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
       await expect(handler.handleLLMStart(mockLLM, ['prompt'], 'test')).resolves.not.toThrow();
+    });
+  });
+
+  describe('startAndRegisterSpan parent resolution', () => {
+    it('creates a fresh root trace for an AgentExecutor chain', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'AgentExecutor', lc: 1, type: 'not_implemented' as const, id: ['test', 'AgentExecutor'] };
+
+      await handler.handleChainStart(chain, {}, 'agent-exec-1');
+
+      expect(mockTracer.startSpan).toHaveBeenCalledWith('AgentExecutor', expect.not.objectContaining({ parentContext: expect.anything() }));
+      expect((handler as any)['persistentRootTraceId']).toBe('test-trace');
+    });
+
+    it('parents subsequent spans under the persistent root trace once AgentExecutor has run', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const agentChain = { name: 'AgentExecutor', lc: 1, type: 'not_implemented' as const, id: ['test', 'AgentExecutor'] };
+      await handler.handleChainStart(agentChain, {}, 'agent-exec-2');
+
+      const tool = { name: 'tool', lc: 1, type: 'not_implemented' as const, id: ['test', 'tool'] };
+      await handler.handleToolStart(tool, 'input', 'tool-under-root');
+
+      const [, toolOptions] = mockTracer.startSpan.mock.calls[mockTracer.startSpan.mock.calls.length - 1];
+      expect(toolOptions.parentContext).toEqual({
+        traceId: 'test-trace',
+        spanId: 'test-span',
+        traceFlags: 1,
+      });
+    });
+
+    it('falls back to the runMap parent span when no persistent root trace exists', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+      await handler.handleChainStart(chain, {}, 'parent-run');
+
+      const tool = { name: 'tool', lc: 1, type: 'not_implemented' as const, id: ['test', 'tool'] };
+      await handler.handleToolStart(tool, 'input', 'child-run', 'parent-run');
+
+      const [, toolOptions] = mockTracer.startSpan.mock.calls[mockTracer.startSpan.mock.calls.length - 1];
+      expect(toolOptions.parent).toBe((handler as any)['runMap'].get('parent-run'));
+    });
+
+    it('falls back to getCurrentSpan() when there is no persistent root and no runMap parent', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const currentSpan = { context: { traceId: 'ambient-trace', spanId: 'ambient-span' } } as any;
+
+      await setCurrentSpan(currentSpan);
+      try {
+        const tool = { name: 'tool', lc: 1, type: 'not_implemented' as const, id: ['test', 'tool'] };
+        await handler.handleToolStart(tool, 'input', 'no-parent-run');
+      } finally {
+        setCurrentSpan(undefined);
+      }
+
+      const [, toolOptions] = mockTracer.startSpan.mock.calls[mockTracer.startSpan.mock.calls.length - 1];
+      expect(toolOptions.parent).toBe(currentSpan);
+    });
+
+    it('creates a root-less span when there is no persistent root, runMap parent, or ambient span', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+
+      const tool = { name: 'tool', lc: 1, type: 'not_implemented' as const, id: ['test', 'tool'] };
+      await handler.handleToolStart(tool, 'input', 'orphan-run');
+
+      const [, toolOptions] = mockTracer.startSpan.mock.calls[mockTracer.startSpan.mock.calls.length - 1];
+      expect(toolOptions.parent).toBeUndefined();
+      expect(toolOptions.parentContext).toBeUndefined();
+    });
+  });
+
+  describe('handleSpanEnd', () => {
+    it('warns and no-ops when the runId is not in runMap', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await expect(handler.handleToolEnd?.('output', 'never-started')).resolves.not.toThrow();
+
+      expect(warnSpy).toHaveBeenCalledWith('Span not found in runMap. Skipping operation');
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('handleLLMNewToken', () => {
+    it('records the first-token time and threads it into completionStartTime on handleLLMEnd', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'stream-run');
+      await handler.handleLLMNewToken('tok', undefined, 'stream-run');
+
+      expect((handler as any)['completionStartTimes']['stream-run']).toBeInstanceOf(Date);
+
+      const spanBeforeEnd = (handler as any)['runMap'].get('stream-run');
+      await handler.handleLLMEnd?.({ generations: [[{ text: 'result' }]] }, 'stream-run');
+
+      expect(spanBeforeEnd.attributes.completionStartTime).toBeInstanceOf(Date);
+      expect((handler as any)['completionStartTimes']['stream-run']).toBeUndefined();
+    });
+
+    it('does not overwrite an existing completionStartTime for the same runId', async () => {
+      const handler = new TracciaCallbackHandler();
+      await handler.handleLLMNewToken('tok1', undefined, 'multi-token-run');
+      const first = (handler as any)['completionStartTimes']['multi-token-run'];
+
+      await handler.handleLLMNewToken('tok2', undefined, 'multi-token-run');
+
+      expect((handler as any)['completionStartTimes']['multi-token-run']).toBe(first);
+    });
+  });
+
+  describe('handleGenerationStart model name resolution', () => {
+    it('prefers invocation_params.model over metadata.ls_model_name', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+
+      await handler.handleLLMStart(
+        mockLLM,
+        ['prompt'],
+        'model-run-1',
+        undefined,
+        { invocation_params: { model: 'from-invocation-params' } },
+        undefined,
+        { ls_model_name: 'from-metadata' },
+      );
+
+      const span = (handler as any)['runMap'].get('model-run-1');
+      expect(span.attributes.model).toBe('from-invocation-params');
+    });
+
+    it('falls back to metadata.ls_model_name when invocation_params.model is absent', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+
+      await handler.handleLLMStart(
+        mockLLM,
+        ['prompt'],
+        'model-run-2',
+        undefined,
+        { invocation_params: {} },
+        undefined,
+        { ls_model_name: 'from-metadata' },
+      );
+
+      const span = (handler as any)['runMap'].get('model-run-2');
+      expect(span.attributes.model).toBe('from-metadata');
+    });
+  });
+
+  describe('handleLLMEnd usage extraction', () => {
+    it('reads usage_metadata off an AIMessage generation (input/output/total tokens)', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'usage-run-1');
+
+      const aiMessage = new AIMessage({
+        content: 'response',
+        usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      });
+      const span = (handler as any)['runMap'].get('usage-run-1');
+      await handler.handleLLMEnd?.({ generations: [[{ message: aiMessage, text: '' }]] } as any, 'usage-run-1');
+
+      expect(span.attributes.usageDetails).toEqual({ input: 10, output: 5, total: 15 });
+    });
+
+    it('subtracts input_token_details values (e.g. cache tokens) out of the input total', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'usage-run-2');
+
+      const aiMessage = new AIMessage({
+        content: 'response',
+        usage_metadata: {
+          input_tokens: 10,
+          output_tokens: 5,
+          total_tokens: 15,
+          input_token_details: { cache_read: 4 },
+        },
+      });
+      const span = (handler as any)['runMap'].get('usage-run-2');
+      await handler.handleLLMEnd?.({ generations: [[{ message: aiMessage, text: '' }]] } as any, 'usage-run-2');
+
+      expect(span.attributes.usageDetails.input_cache_read).toBe(4);
+      expect(span.attributes.usageDetails.input).toBe(6);
+    });
+
+    it('subtracts output_token_details values (e.g. reasoning tokens) out of the output total', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'usage-run-3');
+
+      const aiMessage = new AIMessage({
+        content: 'response',
+        usage_metadata: {
+          input_tokens: 10,
+          output_tokens: 20,
+          total_tokens: 30,
+          output_token_details: { reasoning: 8 },
+        },
+      });
+      const span = (handler as any)['runMap'].get('usage-run-3');
+      await handler.handleLLMEnd?.({ generations: [[{ message: aiMessage, text: '' }]] } as any, 'usage-run-3');
+
+      expect(span.attributes.usageDetails.output_reasoning).toBe(8);
+      expect(span.attributes.usageDetails.output).toBe(12);
+    });
+
+    it('clamps the adjusted total at 0 (never goes negative)', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'usage-run-4');
+
+      const aiMessage = new AIMessage({
+        content: 'response',
+        usage_metadata: {
+          input_tokens: 3,
+          output_tokens: 5,
+          total_tokens: 8,
+          input_token_details: { cache_read: 100 },
+        },
+      });
+      const span = (handler as any)['runMap'].get('usage-run-4');
+      await handler.handleLLMEnd?.({ generations: [[{ message: aiMessage, text: '' }]] } as any, 'usage-run-4');
+
+      expect(span.attributes.usageDetails.input).toBe(0);
+    });
+
+    it('falls back to legacy promptTokens/completionTokens/totalTokens field names', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'usage-run-5');
+
+      const span = (handler as any)['runMap'].get('usage-run-5');
+      await handler.handleLLMEnd?.(
+        {
+          generations: [[{ text: 'response' }]],
+          llmOutput: { tokenUsage: { promptTokens: 7, completionTokens: 3, totalTokens: 10 } },
+        } as any,
+        'usage-run-5',
+      );
+
+      expect(span.attributes.usageDetails).toEqual({ input: 7, output: 3, total: 10 });
+    });
+  });
+
+  describe('extractModelNameFromMetadata', () => {
+    it('reads response_metadata.model_name off an AIMessage', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'model-extract-run');
+
+      const aiMessage = new AIMessage({
+        content: 'response',
+        response_metadata: { model_name: 'gpt-4-from-response' },
+      });
+      const span = (handler as any)['runMap'].get('model-extract-run');
+      await handler.handleLLMEnd?.({ generations: [[{ message: aiMessage, text: '' }]] } as any, 'model-extract-run');
+
+      expect(span.attributes.model).toBe('gpt-4-from-response');
+    });
+
+    it('returns undefined (does not throw) when the generation has no message', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'model-extract-run-2');
+
+      const span = (handler as any)['runMap'].get('model-extract-run-2');
+      await handler.handleLLMEnd?.({ generations: [[{ text: 'plain text response' }]] } as any, 'model-extract-run-2');
+
+      expect(span.attributes.model).toBeUndefined();
+    });
+  });
+
+  describe('extractChatMessageContent (via handleChatModelStart)', () => {
+    async function runChatModelStart(messages: any[]) {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const mockLLM = { name: 'chat-llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'chat-llm'] };
+      await handler.handleChatModelStart(mockLLM, [messages], 'chat-run');
+      return (handler as any)['runMap'].get('chat-run');
+    }
+
+    it('maps a human message to role "user"', async () => {
+      const span = await runChatModelStart([new HumanMessage('hi')]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'user', content: 'hi' });
+    });
+
+    it('maps a generic ChatMessage to role "human"', async () => {
+      const span = await runChatModelStart([new ChatMessage('hi', 'someRole')]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'human', content: 'hi' });
+    });
+
+    it('maps a system message to role "system"', async () => {
+      const span = await runChatModelStart([new SystemMessage('be nice')]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'system', content: 'be nice' });
+    });
+
+    it('maps an AI message to role "assistant" and extracts tool_calls', async () => {
+      const aiMessage = new AIMessage({
+        content: '',
+        tool_calls: [{ name: 'search', args: { q: 'x' }, id: 'call-1' }],
+      });
+      const span = await runChatModelStart([aiMessage]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'assistant' });
+      expect(span.attributes.input[0].tool_calls).toEqual([{ name: 'search', args: { q: 'x' }, id: 'call-1' }]);
+    });
+
+    it('extracts tool_calls from additional_kwargs when message.tool_calls is empty', async () => {
+      const legacyToolCalls = [{ id: 'legacy-call', type: 'function', function: { name: 'f', arguments: '{}' } }];
+      const aiMessage = new AIMessage({
+        content: '',
+        additional_kwargs: { tool_calls: legacyToolCalls as any },
+      });
+      const span = await runChatModelStart([aiMessage]);
+      expect(span.attributes.input[0].tool_calls).toEqual(legacyToolCalls);
+    });
+
+    it('maps a function message to its name as role', async () => {
+      const span = await runChatModelStart([new FunctionMessage({ content: 'result', name: 'my_function' })]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'my_function', content: 'result' });
+    });
+
+    it('maps a tool message to its name as role', async () => {
+      const span = await runChatModelStart([new ToolMessage('result', 'call-1', 'my_tool')]);
+      expect(span.attributes.input[0]).toMatchObject({ role: 'my_tool', content: 'result' });
+    });
+
+    it('merges additional_kwargs.function_call into the output when present and no tool_calls extracted', async () => {
+      const aiMessage = new AIMessage({
+        content: '',
+        additional_kwargs: { function_call: { name: 'legacy_fn', arguments: '{}' } },
+      });
+      const span = await runChatModelStart([aiMessage]);
+      expect(span.attributes.input[0].additional_kwargs.function_call).toEqual({
+        name: 'legacy_fn',
+        arguments: '{}',
+      });
+    });
+  });
+
+  describe('handleRetrieverStart / End / Error', () => {
+    it('creates a span for retriever start with the query as input', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const retriever = { name: 'my-retriever', lc: 1, type: 'not_implemented' as const, id: ['test', 'my-retriever'] };
+
+      await handler.handleRetrieverStart(retriever, 'search query', 'retriever-1');
+
+      const span = (handler as any)['runMap'].get('retriever-1');
+      expect(span.attributes.input).toBe('search query');
+    });
+
+    it('ends the retriever span with documents as output', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const retriever = { name: 'my-retriever', lc: 1, type: 'not_implemented' as const, id: ['test', 'my-retriever'] };
+      await handler.handleRetrieverStart(retriever, 'query', 'retriever-2');
+
+      const docs = [{ pageContent: 'doc1', metadata: {} }];
+      await handler.handleRetrieverEnd(docs as any, 'retriever-2');
+
+      expect((handler as any)['runMap'].has('retriever-2')).toBe(false);
+    });
+
+    it('ends the retriever span with an ERROR level on failure', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const retriever = { name: 'my-retriever', lc: 1, type: 'not_implemented' as const, id: ['test', 'my-retriever'] };
+      await handler.handleRetrieverStart(retriever, 'query', 'retriever-3');
+
+      const span = (handler as any)['runMap'].get('retriever-3');
+      await handler.handleRetrieverError(new Error('retriever failed'), 'retriever-3');
+
+      expect(span.attributes.level).toBe('ERROR');
+      expect((handler as any)['runMap'].has('retriever-3')).toBe(false);
+    });
+  });
+
+  describe('parseAzureRefusalError (via handleChainError / handleLLMError)', () => {
+    it('appends error details when the error has an "error" property', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+      await handler.handleChainStart(chain, {}, 'azure-err-run');
+      const span = (handler as any)['runMap'].get('azure-err-run');
+
+      const err: any = new Error('refused');
+      err.error = { code: 'content_filter', message: 'blocked' };
+
+      await handler.handleChainError?.(err, 'azure-err-run');
+
+      expect(span.attributes.statusMessage).toContain('Error details:');
+      expect(span.attributes.statusMessage).toContain('content_filter');
+    });
+
+    it('leaves statusMessage as just the error string when there is no "error" property', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+      await handler.handleChainStart(chain, {}, 'plain-err-run');
+      const span = (handler as any)['runMap'].get('plain-err-run');
+
+      await handler.handleChainError?.(new Error('plain failure'), 'plain-err-run');
+
+      expect(span.attributes.statusMessage).toBe('Error: plain failure');
+    });
+  });
+
+  describe('Langfuse prompt registration passthrough', () => {
+    it('registers a langfusePrompt from chain-start metadata against the parent run, then threads it into the next generation and deregisters it', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+      const prompt = { name: 'my-prompt', version: 2, isFallback: false };
+
+      // registerLangfusePrompt keys off the chain-start event's own *parentRunId*,
+      // not its runId - so a chain running under parent "lf-parent" registers the
+      // prompt to be picked up by the next generation whose parentRunId is also
+      // "lf-parent".
+      await handler.handleChainStart(chain, {}, 'lf-child', 'lf-parent', undefined, {
+        langfusePrompt: prompt,
+      });
+
+      expect((handler as any)['promptToParentRunMap'].get('lf-parent')).toEqual(prompt);
+
+      const mockLLM = { name: 'llm', lc: 1, type: 'not_implemented' as const, id: ['test', 'llm'] };
+      await handler.handleLLMStart(mockLLM, ['prompt'], 'lf-generation', 'lf-parent');
+
+      const span = (handler as any)['runMap'].get('lf-generation');
+      expect(span.attributes.prompt).toEqual(prompt);
+      expect((handler as any)['promptToParentRunMap'].has('lf-parent')).toBe(false);
+    });
+  });
+
+  describe('tags and metadata on spans', () => {
+    it('attaches tags to the span attributes', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+
+      await handler.handleChainStart(chain, {}, 'tagged-run', undefined, ['tag1', 'tag2']);
+
+      const span = (handler as any)['runMap'].get('tagged-run');
+      expect(span.attributes.tags).toEqual(['tag1', 'tag2']);
+    });
+
+    it('merges metadata into span attributes and strips Langfuse-only keys', async () => {
+      const handler = new TracciaCallbackHandler();
+      (handler as any)['tracer'] = mockTracer;
+      const chain = { name: 'chain', lc: 1, type: 'not_implemented' as const, id: ['test', 'chain'] };
+
+      await handler.handleChainStart(chain, {}, 'metadata-run', undefined, undefined, {
+        customKey: 'customValue',
+        langfusePrompt: { name: 'p', version: 1, isFallback: false },
+        langfuseUserId: 'user-1',
+        langfuseSessionId: 'session-1',
+      });
+
+      const span = (handler as any)['runMap'].get('metadata-run');
+      expect(span.attributes.customKey).toBe('customValue');
+      expect(span.attributes.langfusePrompt).toBeUndefined();
+      expect(span.attributes.langfuseUserId).toBeUndefined();
+      expect(span.attributes.langfuseSessionId).toBeUndefined();
     });
   });
 });
