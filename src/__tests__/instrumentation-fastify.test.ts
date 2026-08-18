@@ -143,6 +143,67 @@ describe('Fastify Instrumentation', () => {
             expect(mockSpan.statusDescription).toBe('Test Error');
             expect(done).toHaveBeenCalled();
         });
+
+        it('onRequest hook matches a RegExp ignorePaths pattern', () => {
+            const plugin = fastifyPlugin({ ignorePaths: [/^\/ignore/] });
+            plugin(mockFastify, {}, jest.fn());
+
+            const req = { url: '/ignore/this?x=1' };
+            const done = jest.fn();
+
+            hooks['onRequest'](req, {}, done);
+
+            expect(getTracer).not.toHaveBeenCalled();
+            expect(done).toHaveBeenCalled();
+        });
+
+        it('onRequest hook does not ignore a path that matches no pattern in a non-empty list', () => {
+            const plugin = fastifyPlugin({ ignorePaths: ['/other', /^\/ignore/] });
+            plugin(mockFastify, {}, jest.fn());
+
+            const req = { method: 'GET', url: '/not-ignored' } as any;
+            hooks['onRequest'](req, {}, jest.fn());
+
+            expect(getTracer).toHaveBeenCalled();
+        });
+
+        it('onRequest hook uses a custom spanName function when provided', () => {
+            const spanName = jest.fn(() => 'custom-name');
+            const plugin = fastifyPlugin({ spanName });
+            plugin(mockFastify, {}, jest.fn());
+
+            const req = { method: 'GET', url: '/x' } as any;
+            hooks['onRequest'](req, {}, jest.fn());
+
+            expect(mockTracer.startSpan).toHaveBeenCalledWith('custom-name');
+        });
+
+        it('onResponse hook no-ops (still calls done) when there is no _tracciaSpan', () => {
+            const plugin = fastifyPlugin();
+            plugin(mockFastify, {}, jest.fn());
+
+            const req = {} as any;
+            const done = jest.fn();
+
+            hooks['onResponse'](req, { statusCode: 200 }, done);
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalled();
+            expect(mockSpan.end).not.toHaveBeenCalled();
+            expect(done).toHaveBeenCalled();
+        });
+
+        it('onError hook no-ops (still calls done) when there is no _tracciaSpan', () => {
+            const plugin = fastifyPlugin();
+            plugin(mockFastify, {}, jest.fn());
+
+            const req = {} as any;
+            const done = jest.fn();
+
+            hooks['onError'](req, {}, new Error('x'), done);
+
+            expect(mockSpan.recordException).not.toHaveBeenCalled();
+            expect(done).toHaveBeenCalled();
+        });
     });
 
     describe('fastifyPluginAsync', () => {

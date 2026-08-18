@@ -14,7 +14,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 
 ## Features
 
-- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, LangChain support.
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (`@google/genai`), LangChain support.
 - **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically.
 - **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery.
 - **Decorator-Based**: Trace any function with the `@observe` decorator.
@@ -146,6 +146,33 @@ async function generateText(prompt: string) {
 const text = await generateText("Write a haiku about TypeScript");
 ```
 
+### Gemini (`@google/genai`)
+
+Wrap `client.interactions.create` to trace the Gemini **Interactions API** (`@google/genai` `>=2.9.0`, tested against `2.17.1`). This is the only Gemini surface instrumented today — `models.generateContent` is not covered.
+
+```typescript
+import { Traccia, wrapGeminiInteractionsCreate } from '@traccia/sdk';
+import { GoogleGenAI } from '@google/genai';
+
+await Traccia.init();
+
+const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+client.interactions.create = wrapGeminiInteractionsCreate(
+  client.interactions.create.bind(client.interactions),
+  client.interactions,
+);
+
+const response = await client.interactions.create({
+  model: 'models/gemini-2.5-flash',
+  input: 'Write a haiku about TypeScript',
+});
+```
+
+Captures `llm.model`, `llm.prompt`, `llm.completion`, `llm.previous_interaction_id` (multi-turn), and token usage read directly from the provider's `usage.total_*` fields (`total_input_tokens`, `total_output_tokens`, `total_thought_tokens`, `total_cached_tokens`, `total_tool_use_tokens`, `total_tokens`) — never synthesized from input+output, so thinking/cache/tool tokens aren't dropped.
+
+**Streaming (`stream: true`)**: the span is still created and ends with request attributes (`llm.streaming: true`), but usage/completion population is intentionally skipped — `create()` resolves with a `Stream` object almost immediately, before the model has produced output, so populating from it would record a near-zero duration and no usage data.
+
 ---
 
 ## Configuration
@@ -188,6 +215,7 @@ project = "my-default-project"
 # Enable/disable specific integrations
 langchain = true
 openai = true
+gemini = true
 ```
 
 ### Environment Variables

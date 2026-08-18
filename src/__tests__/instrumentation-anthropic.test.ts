@@ -1,4 +1,4 @@
-import { patchAnthropic, wrapAnthropicCreate } from '../instrumentation/anthropic';
+import { wrapAnthropicCreate } from '../instrumentation/anthropic';
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
 
@@ -26,26 +26,68 @@ describe('Anthropic Instrumentation', () => {
     });
 
     describe('patchAnthropic', () => {
+        // `_patched` is module-level state inside anthropic.ts that persists once
+        // set to true, so a shared import would let an earlier successful patch
+        // mask a later test's require() failure (patchAnthropic short-circuits
+        // before ever touching @anthropic-ai/sdk). jest.isolateModules gives each
+        // test a fresh module instance (fresh `_patched = false`) so every branch
+        // is actually exercised. See src/instrumentation/gemini.ts's equivalent
+        // fix for the same underlying bug.
         it('should patch when anthropic is available', () => {
-            jest.doMock('@anthropic-ai/sdk', () => {
-                return {};
-            }, { virtual: true });
-            
-            const result = patchAnthropic();
-            expect(result).toBe(true);
-            jest.dontMock('@anthropic-ai/sdk');
+            jest.isolateModules(() => {
+                jest.doMock('@anthropic-ai/sdk', () => ({}), { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/anthropic');
+                expect(fresh.patchAnthropic()).toBe(true);
+
+                jest.dontMock('@anthropic-ai/sdk');
+            });
         });
-        
-        it('should return false if anthropic not available', () => {
-            jest.doMock('@anthropic-ai/sdk', () => {
-                throw new Error('Not found');
-            }, { virtual: true });
-            
-            // To ensure we get false (since _patched is a module-level variable),
-            // we have to rely on order if _patched is already true. But wait, if _patched is true,
-            // we can't test it. The previous test makes it true. We'll skip testing the internal state 
-            // since we can't isolate it easily without resetting modules.
-            // Let's at least test wrapAnthropicCreate which does the heavy lifting.
+
+        it('should return false when @anthropic-ai/sdk is not installed', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@anthropic-ai/sdk', () => {
+                    throw new Error('Cannot find module \'@anthropic-ai/sdk\'');
+                }, { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/anthropic');
+                expect(() => fresh.patchAnthropic()).not.toThrow();
+                expect(fresh.patchAnthropic()).toBe(false);
+
+                jest.dontMock('@anthropic-ai/sdk');
+            });
+        });
+
+        it('should return false when @anthropic-ai/sdk resolves to a falsy module', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@anthropic-ai/sdk', () => null, { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/anthropic');
+                expect(fresh.patchAnthropic()).toBe(false);
+
+                jest.dontMock('@anthropic-ai/sdk');
+            });
+        });
+
+        it('should return true on subsequent calls without re-checking the module', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@anthropic-ai/sdk', () => ({}), { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/anthropic');
+                expect(fresh.patchAnthropic()).toBe(true);
+
+                jest.dontMock('@anthropic-ai/sdk');
+                jest.doMock('@anthropic-ai/sdk', () => {
+                    throw new Error('should never be reached');
+                }, { virtual: true });
+                expect(fresh.patchAnthropic()).toBe(true);
+
+                jest.dontMock('@anthropic-ai/sdk');
+            });
         });
     });
 

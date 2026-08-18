@@ -122,6 +122,71 @@ describe('Express Instrumentation', () => {
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.client_closed', true);
             expect(mockSpan.end).toHaveBeenCalled();
         });
+
+        it('should no-op on close when the span has already ended via finish', () => {
+            const middleware = expressMiddleware();
+            middleware(mockReq, mockRes, mockNext);
+
+            const finishHandler = mockRes.on.mock.calls.find((call: any) => call[0] === 'finish')[1];
+            finishHandler();
+            (mockSpan as any).endTimeNs = Date.now();
+            (mockSpan.setAttribute as jest.Mock).mockClear();
+            (mockSpan.end as jest.Mock).mockClear();
+
+            const closeHandler = mockRes.on.mock.calls.find((call: any) => call[0] === 'close')[1];
+            closeHandler();
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('http.client_closed', true);
+            expect(mockSpan.end).not.toHaveBeenCalled();
+        });
+
+        it('matches a RegExp ignorePaths pattern (not just string patterns)', () => {
+            mockReq.path = '/ignore/this';
+            const middleware = expressMiddleware({ ignorePaths: [/^\/ignore/] });
+
+            middleware(mockReq, mockRes, mockNext);
+
+            expect(getTracer).not.toHaveBeenCalled();
+            expect(mockNext).toHaveBeenCalled();
+        });
+
+        it('does not ignore a path that matches no pattern in a non-empty ignorePaths list', () => {
+            mockReq.path = '/not-ignored';
+            const middleware = expressMiddleware({ ignorePaths: ['/other', /^\/ignore/] });
+
+            middleware(mockReq, mockRes, mockNext);
+
+            expect(getTracer).toHaveBeenCalled();
+        });
+
+        it('uses req.route.path for the span name and sets http.route', () => {
+            mockReq.route = { path: '/users/:id' };
+            const middleware = expressMiddleware();
+
+            middleware(mockReq, mockRes, mockNext);
+
+            expect(mockTracer.startSpan).toHaveBeenCalledWith('GET /users/:id');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.route', '/users/:id');
+        });
+
+        it('uses a custom spanName function when provided', () => {
+            const spanName = jest.fn(() => 'custom-span-name');
+            const middleware = expressMiddleware({ spanName });
+
+            middleware(mockReq, mockRes, mockNext);
+
+            expect(mockTracer.startSpan).toHaveBeenCalledWith('custom-span-name');
+        });
+
+        it('falls back to req.url then "/" when req.path is absent', () => {
+            delete mockReq.path;
+            mockReq.url = '/from-url';
+            const middleware = expressMiddleware();
+
+            middleware(mockReq, mockRes, mockNext);
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.path', '/from-url');
+        });
     });
 
     describe('expressErrorMiddleware', () => {
