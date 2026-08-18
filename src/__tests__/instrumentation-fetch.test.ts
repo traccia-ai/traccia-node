@@ -75,6 +75,17 @@ describe('Fetch Instrumentation', () => {
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.url', 'https://string.com');
         });
 
+        it('falls back to init.method, then GET, when a URL-object input has no method', async () => {
+            globalThis.fetch = jest.fn().mockResolvedValue({ status: 200, statusText: 'OK' });
+            patchFetch();
+
+            await (globalThis.fetch as any)({ url: 'https://test.com' }, { method: 'DELETE' });
+            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith('http.DELETE', expect.any(Function));
+
+            await (globalThis.fetch as any)({ url: 'https://test.com' });
+            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith('http.GET', expect.any(Function));
+        });
+
         it('should trace failed requests and set status ERROR', async () => {
             globalThis.fetch = jest.fn().mockResolvedValue({ status: 404, statusText: 'Not Found' });
             patchFetch();
@@ -141,9 +152,20 @@ describe('Fetch Instrumentation', () => {
             const traced = createTracedFetch();
 
             await traced({ toString: () => 'https://err.com' } as any);
-            
+
             expect(mockSpan.status).toBe(SpanStatus.ERROR);
             expect(mockSpan.end).toHaveBeenCalled();
+        });
+
+        it('falls back to init.method, then GET, when a URL-object input has no method', async () => {
+            globalThis.fetch = jest.fn().mockResolvedValue({ status: 200, statusText: 'OK' });
+            const traced = createTracedFetch();
+
+            await traced({ url: 'https://test.com' } as any, { method: 'PATCH' });
+            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith('http.PATCH', expect.any(Function));
+
+            await traced({ url: 'https://test.com' } as any);
+            expect(mockTracer.startActiveSpan).toHaveBeenCalledWith('http.GET', expect.any(Function));
         });
     });
 });

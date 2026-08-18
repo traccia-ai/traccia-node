@@ -1,4 +1,4 @@
-import { patchGemini, wrapGeminiInteractionsCreate } from '../instrumentation/gemini';
+import { wrapGeminiInteractionsCreate } from '../instrumentation/gemini';
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
 
@@ -40,24 +40,84 @@ describe('Gemini Instrumentation', () => {
     });
 
     describe('patchGemini', () => {
+        // `_patched` is module-level state inside gemini.ts that persists once
+        // set to true, so a shared import would let an earlier successful patch
+        // mask a later test's require() failure (patchGemini short-circuits
+        // before ever touching @google/genai). jest.isolateModules gives each
+        // test a fresh module instance (fresh `_patched = false`) so every
+        // branch is actually exercised.
         it('should patch when @google/genai is available', () => {
-            jest.doMock('@google/genai', () => ({
-                GoogleGenAI: class {},
-            }), { virtual: true });
+            jest.isolateModules(() => {
+                jest.doMock('@google/genai', () => ({
+                    GoogleGenAI: class {},
+                }), { virtual: true });
 
-            const result = patchGemini();
-            expect(result).toBe(true);
-            jest.dontMock('@google/genai');
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(fresh.patchGemini()).toBe(true);
+
+                jest.dontMock('@google/genai');
+            });
         });
 
         it('should soft-fail (return false, not throw) when @google/genai is not installed', () => {
-            jest.doMock('@google/genai', () => {
-                throw new Error('Cannot find module \'@google/genai\'');
-            }, { virtual: true });
+            jest.isolateModules(() => {
+                jest.doMock('@google/genai', () => {
+                    throw new Error('Cannot find module \'@google/genai\'');
+                }, { virtual: true });
 
-            expect(() => patchGemini()).not.toThrow();
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(() => fresh.patchGemini()).not.toThrow();
+                expect(fresh.patchGemini()).toBe(false);
 
-            jest.dontMock('@google/genai');
+                jest.dontMock('@google/genai');
+            });
+        });
+
+        it('should soft-fail when @google/genai resolves to a falsy module', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@google/genai', () => null, { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(fresh.patchGemini()).toBe(false);
+
+                jest.dontMock('@google/genai');
+            });
+        });
+
+        it('should soft-fail when neither GoogleGenAI nor a default export is present', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@google/genai', () => ({ SomeOtherExport: class {} }), { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(fresh.patchGemini()).toBe(false);
+
+                jest.dontMock('@google/genai');
+            });
+        });
+
+        it('should return true on subsequent calls without re-checking the module', () => {
+            jest.isolateModules(() => {
+                jest.doMock('@google/genai', () => ({ GoogleGenAI: class {} }), { virtual: true });
+
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const fresh = require('../instrumentation/gemini');
+                expect(fresh.patchGemini()).toBe(true);
+
+                // Even once @google/genai is no longer mockable/available, a
+                // second call should still report patched (cached) rather than
+                // re-attempting the require and failing.
+                jest.dontMock('@google/genai');
+                jest.doMock('@google/genai', () => {
+                    throw new Error('should never be reached');
+                }, { virtual: true });
+                expect(fresh.patchGemini()).toBe(true);
+
+                jest.dontMock('@google/genai');
+            });
         });
     });
 
@@ -212,6 +272,83 @@ describe('Gemini Instrumentation', () => {
             });
 
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.prompt', expect.any(String));
+        });
+
+        it('does not set llm.prompt when input is omitted', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockResolvedValue({ output_text: 'answer' });
+
+            const wrapped = wrapGeminiInteractionsCreate(client.create, client);
+            await wrapped({ model: 'models/gemini-2.5-flash' });
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.prompt', expect.anything());
+        });
+
+        it('does not set llm.prompt and does not throw when input cannot be JSON-serialized', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockResolvedValue({ output_text: 'answer' });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const circular: any = { role: 'user' };
+            circular.self = circular;
+
+            const wrapped = wrapGeminiInteractionsCreate(client.create, client);
+            await expect(wrapped({ model: 'models/gemini-2.5-flash', input: circular })).resolves.toBeDefined();
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.prompt', expect.anything());
+        });
+
+        it('handles a response with no usage/output fields without throwing', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockResolvedValue(null);
+
+            const wrapped = wrapGeminiInteractionsCreate(client.create, client);
+            await expect(wrapped({ model: 'models/gemini-2.5-flash', input: 'hi' })).resolves.toBeNull();
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.usage.total_tokens', expect.anything());
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.completion', expect.anything());
+            expect(mockSpan.end).toHaveBeenCalled();
+        });
+
+        it('handles a primitive (non-object) response without throwing', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockResolvedValue('plain string response');
+
+            const wrapped = wrapGeminiInteractionsCreate(client.create, client);
+            await expect(wrapped({ model: 'models/gemini-2.5-flash', input: 'hi' })).resolves.toBe(
+                'plain string response',
+            );
+
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.usage.total_tokens', expect.anything());
+        });
+
+        it('does not throw when called with no arguments', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockResolvedValue({ output_text: 'answer' });
+
+            const wrapped = wrapGeminiInteractionsCreate(client.create, client);
+            await expect(wrapped()).resolves.toBeDefined();
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.vendor', 'google_gemini');
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('llm.model', expect.anything());
+        });
+
+        it('falls back to the wrapper\'s own `this` when no instance is provided', async () => {
+            const client = new GeminiNextGenInteractions();
+            client.create.mockImplementation(function (this: unknown) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (client as any).capturedThis = this;
+                return Promise.resolve({ output_text: 'answer' });
+            });
+
+            // No `instance` argument -> the wrapper must fall back to its own `this`.
+            const wrapped = wrapGeminiInteractionsCreate(client.create, undefined);
+            const boundWrapped = wrapped.bind(client);
+
+            await boundWrapped({ model: 'models/gemini-2.5-flash', input: 'hi' });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            expect((client as any).capturedThis).toBe(client);
         });
     });
 });

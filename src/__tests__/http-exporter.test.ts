@@ -106,18 +106,31 @@ describe('HttpExporter', () => {
 
   it('should retry on transient status codes (503)', async () => {
     exporter = new HttpExporter({ endpoint: 'http://test/api', maxRetries: 3, backoffBase: 0.01, backoffJitter: 0 });
-    
-    // Fail once with 503, then succeed
-    mockResponse(httpRequestSpy, 503);
-    
-    const exportPromise = exporter.export([createMockSpan()]);
-    
-    // After a short delay, change mock to success
-    setTimeout(() => {
-      mockResponse(httpRequestSpy, 200);
-    }, 50);
 
-    const result = await exportPromise;
+    // Fail on the first call with 503, then succeed on every subsequent call.
+    // Driven by call count (not a real timer) so the assertion can't race the exporter's backoff delay.
+    let callCount = 0;
+    httpRequestSpy.mockImplementation((_options: unknown, callback: (res: unknown) => void) => {
+      callCount++;
+      const statusCode = callCount === 1 ? 503 : 200;
+      const mockRequest = {
+        on: jest.fn(),
+        write: jest.fn(),
+        end: jest.fn(() => {
+          const mockRes = {
+            statusCode,
+            on: jest.fn((event: string, handler: () => void) => {
+              if (event === 'end') setTimeout(handler, 0);
+            })
+          };
+          setTimeout(() => callback(mockRes), 0);
+        }),
+        destroy: jest.fn()
+      };
+      return mockRequest as any;
+    });
+
+    const result = await exporter.export([createMockSpan()]);
     expect(result).toBe(true);
     expect(httpRequestSpy).toHaveBeenCalledTimes(2);
   });
@@ -176,6 +189,35 @@ describe('HttpExporter', () => {
     const payload = JSON.parse(httpRequestSpy.mock.results[0].value.write.mock.calls[0][0]);
     const otelSpan = payload.items[0].scopeSpans[0].spans[0];
     expect(otelSpan.status).toEqual({ code: 'OK', message: 'success' });
+  });
+
+  it('serializes custom ERROR status (2) to otel status', async () => {
+    exporter = new HttpExporter({ endpoint: 'http://test/api' });
+    mockResponse(httpRequestSpy, 200);
+
+    const span = createMockSpan();
+    span.status = 2;
+    span.statusDescription = 'boom';
+
+    await exporter.export([span]);
+
+    const payload = JSON.parse(httpRequestSpy.mock.results[0].value.write.mock.calls[0][0]);
+    const otelSpan = payload.items[0].scopeSpans[0].spans[0];
+    expect(otelSpan.status).toEqual({ code: 'ERROR', message: 'boom' });
+  });
+
+  it('serializes an unrecognized custom status code to UNSET', async () => {
+    exporter = new HttpExporter({ endpoint: 'http://test/api' });
+    mockResponse(httpRequestSpy, 200);
+
+    const span = createMockSpan();
+    span.status = 99 as any;
+
+    await exporter.export([span]);
+
+    const payload = JSON.parse(httpRequestSpy.mock.results[0].value.write.mock.calls[0][0]);
+    const otelSpan = payload.items[0].scopeSpans[0].spans[0];
+    expect(otelSpan.status.code).toBe('UNSET');
   });
 
   it('should have a noop shutdown method', async () => {
