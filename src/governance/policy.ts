@@ -10,9 +10,16 @@ const DEFAULT_STATUS_PATH = '/api/v1/agents/{agent_id}/status';
 const DEFAULT_BLOCK_PATH = '/api/v1/agents/{agent_id}/blocks';
 
 export class AgentBlockedError extends Error {
-  constructor(message: string) {
+  decisionId?: string;
+  remainingBudgetUsd?: number | null;
+  reasons: string[];
+
+  constructor(message: string, extras?: { decisionId?: string; remainingBudgetUsd?: number | null; reasons?: string[] }) {
     super(message);
     this.name = 'AgentBlockedError';
+    this.decisionId = extras?.decisionId;
+    this.remainingBudgetUsd = extras?.remainingBudgetUsd;
+    this.reasons = extras?.reasons || [];
   }
 }
 

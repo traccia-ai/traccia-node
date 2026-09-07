@@ -118,6 +118,19 @@ describe('Fetch Instrumentation', () => {
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.url', 'invalid_url_that_throws_on_parse');
             expect(mockSpan.end).toHaveBeenCalled();
         });
+
+        it('skips tracing for Traccia govern and bookkeeping URLs', async () => {
+            const mockFetch = jest.fn().mockResolvedValue({ status: 200, statusText: 'OK' });
+            globalThis.fetch = mockFetch;
+            patchFetch();
+
+            await globalThis.fetch('http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/status');
+            await globalThis.fetch('http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/blocks');
+            await globalThis.fetch('https://api.traccia.ai/api/v1/prompt-runtime/prompts/support-reply');
+
+            expect(mockTracer.startActiveSpan).not.toHaveBeenCalled();
+            expect(mockFetch).toHaveBeenCalledTimes(3);
+        });
     });
 
     describe('createTracedFetch', () => {

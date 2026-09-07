@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 interface RunIdentity {
   agentId?: string;
   agentName?: string;
+  pepEnabled?: boolean;
 }
 
 interface RuntimeConfig {
@@ -146,10 +147,18 @@ export function setAttrTruncationLimit(limit?: number): void {
 /**
  * Run-scoped agent identity for parallel runs in one process (matches Python run_identity).
  */
+export function pepEnabled(): boolean {
+  return Boolean(runIdentityStorage.getStore()?.pepEnabled);
+}
+
 export function runIdentity<T>(
-  identity: { agentId?: string; agentName?: string },
+  identity: { agentId?: string; agentName?: string; pepEnabled?: boolean },
   fn: () => T | Promise<T>,
 ): T | Promise<T> {
   const parent = runIdentityStorage.getStore() || {};
-  return runIdentityStorage.run({ ...parent, ...identity }, fn);
+  const next: RunIdentity = { ...parent };
+  if (identity.agentId !== undefined) next.agentId = identity.agentId;
+  if (identity.agentName !== undefined) next.agentName = identity.agentName;
+  if (identity.pepEnabled !== undefined) next.pepEnabled = identity.pepEnabled;
+  return runIdentityStorage.run(next, fn);
 }

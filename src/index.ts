@@ -15,6 +15,7 @@ export {
 export { observe, ObserveOptions } from './instrumentation/decorator';
 export { govern, GovernOptions } from './governance/govern';
 export { AgentBlockedError, checkAgentStatus } from './governance/policy';
+export { checkPolicy } from './governance/pep';
 export { disclosure, enrichGovernanceAttributes } from './governance/disclosure';
 export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './governance/disclosure';
 export { governanceHooks, GovernanceManager } from './governance/hooks';

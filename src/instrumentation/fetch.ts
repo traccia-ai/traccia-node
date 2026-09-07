@@ -6,6 +6,7 @@
 
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
+import { shouldSkipHttp } from './http-skip';
 
 let _patched = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -18,6 +19,24 @@ type FetchResponse = {
     status: number;
     statusText: string;
 };
+
+function resolveFetchRequest(input: FetchInput, init?: FetchInit): { url: string; method: string } {
+    let url: string;
+    let method: string;
+
+    if (typeof input === 'string') {
+        url = input;
+        method = init?.method || 'GET';
+    } else if (typeof input === 'object' && 'url' in input) {
+        url = input.url;
+        method = input.method || init?.method || 'GET';
+    } else {
+        url = String(input);
+        method = init?.method || 'GET';
+    }
+
+    return { url, method: method.toUpperCase() };
+}
 
 /**
  * Patch native fetch for HTTP request tracing.
@@ -43,25 +62,14 @@ export function patchFetch(): boolean {
         input: FetchInput,
         init?: FetchInit
     ): Promise<FetchResponse> {
-        const tracer = getTracer('fetch');
-        const startTime = Date.now();
-
-        // Extract URL and method
-        let url: string;
-        let method: string;
-
-        if (typeof input === 'string') {
-            url = input;
-            method = init?.method || 'GET';
-        } else if (typeof input === 'object' && 'url' in input) {
-            url = input.url;
-            method = input.method || init?.method || 'GET';
-        } else {
-            url = String(input);
-            method = init?.method || 'GET';
+        const { url, method } = resolveFetchRequest(input, init);
+        if (shouldSkipHttp(url)) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+            return _originalFetch(input, init) as Promise<FetchResponse>;
         }
 
-        method = method.toUpperCase();
+        const tracer = getTracer('fetch');
+        const startTime = Date.now();
 
         return tracer.startActiveSpan(`http.${method}`, async (span: ISpan) => {
             span.setAttribute('span.type', 'TOOL');
@@ -137,25 +145,14 @@ export function createTracedFetch(): (input: FetchInput, init?: FetchInit) => Pr
         input: FetchInput,
         init?: FetchInit
     ): Promise<FetchResponse> {
-        const tracer = getTracer('fetch');
-        const startTime = Date.now();
-
-        // Extract URL and method
-        let url: string;
-        let method: string;
-
-        if (typeof input === 'string') {
-            url = input;
-            method = init?.method || 'GET';
-        } else if (typeof input === 'object' && 'url' in input) {
-            url = input.url;
-            method = input.method || init?.method || 'GET';
-        } else {
-            url = String(input);
-            method = init?.method || 'GET';
+        const { url, method } = resolveFetchRequest(input, init);
+        if (shouldSkipHttp(url)) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+            return originalFetch(input, init) as Promise<FetchResponse>;
         }
 
-        method = method.toUpperCase();
+        const tracer = getTracer('fetch');
+        const startTime = Date.now();
 
         return tracer.startActiveSpan(`http.${method}`, async (span: ISpan) => {
             span.setAttribute('span.type', 'TOOL');

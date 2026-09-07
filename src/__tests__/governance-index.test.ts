@@ -16,6 +16,7 @@ describe('governance barrel export', () => {
         expect(governance.governanceHooks).toBeDefined();
         expect(typeof governance.GovernanceManager).toBe('function');
         expect(typeof governance.AgentBlockedError).toBe('function');
+        expect(typeof governance.checkPolicy).toBe('function');
         expect(typeof governance.disclosure).toBe('function');
         expect(typeof governance.enrichGovernanceAttributes).toBe('function');
     });

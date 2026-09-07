@@ -7,20 +7,23 @@ jest.mock('../governance/policy', () => ({
 
 jest.mock('../config/runtime-config', () => ({
     runIdentity: jest.fn((_identity: unknown, fn: () => unknown) => fn()),
+    getAgentId: jest.fn(),
 }));
 
 import { govern } from '../governance/govern';
 import { checkAgentStatus } from '../governance/policy';
-import { runIdentity } from '../config/runtime-config';
+import { getAgentId, runIdentity } from '../config/runtime-config';
 
 describe('govern', () => {
     const mockCheckAgentStatus = checkAgentStatus as jest.Mock;
     const mockRunIdentity = runIdentity as jest.Mock;
+    const mockGetAgentId = getAgentId as jest.Mock;
 
     beforeEach(() => {
         jest.clearAllMocks();
         mockCheckAgentStatus.mockReset().mockResolvedValue(undefined);
         mockRunIdentity.mockReset().mockImplementation((_identity: unknown, fn: () => unknown) => fn());
+        mockGetAgentId.mockReset().mockReturnValue(undefined);
         delete process.env.TRACCIA_AGENT_ID;
     });
 
@@ -121,6 +124,20 @@ describe('govern', () => {
             expect(mockCheckAgentStatus).toHaveBeenCalledWith('explicit-agent', { failOpen: true });
         });
 
+        it('inherits agentId from init when govern() has no agentId', async () => {
+            mockGetAgentId.mockReturnValue('from-init');
+            const fn = jest.fn().mockReturnValue('ok');
+            const wrapped = govern({ failOpen: false })(fn) as (...args: unknown[]) => unknown;
+
+            await wrapped();
+
+            expect(mockCheckAgentStatus).toHaveBeenCalledWith('from-init', { failOpen: false });
+            expect(mockRunIdentity).toHaveBeenCalledWith(
+                { pepEnabled: true },
+                expect.any(Function),
+            );
+        });
+
         it('falls back to TRACCIA_AGENT_ID env var when agentId option is absent', async () => {
             process.env.TRACCIA_AGENT_ID = 'env-agent';
             const fn = jest.fn().mockReturnValue('ok');
@@ -131,7 +148,7 @@ describe('govern', () => {
             expect(mockCheckAgentStatus).toHaveBeenCalledWith('env-agent', { failOpen: true });
         });
 
-        it('warns and skips the policy check when neither agentId nor TRACCIA_AGENT_ID is set', async () => {
+        it('warns and skips the policy check when init, govern, and env are empty', async () => {
             const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
             const fn = jest.fn().mockReturnValue('ok');
             const wrapped = govern({})(fn) as (...args: unknown[]) => unknown;
@@ -141,7 +158,7 @@ describe('govern', () => {
             expect(result).toBe('ok');
             expect(mockCheckAgentStatus).not.toHaveBeenCalled();
             expect(warnSpy).toHaveBeenCalledWith(
-                expect.stringContaining('No agentId provided to govern()'),
+                expect.stringContaining('No agentId on init, govern()'),
             );
 
             warnSpy.mockRestore();
@@ -183,7 +200,7 @@ describe('govern', () => {
             await wrapped();
 
             expect(mockRunIdentity).toHaveBeenCalledWith(
-                { agentId: 'agent-1', agentName: 'my-agent' },
+                { pepEnabled: true, agentId: 'agent-1', agentName: 'my-agent' },
                 expect.any(Function),
             );
         });
@@ -198,6 +215,7 @@ describe('govern', () => {
             }));
             jest.doMock('../config/runtime-config', () => ({
                 runIdentity: jest.fn((_identity: unknown, fn: () => unknown) => fn()),
+                getAgentId: jest.fn(),
             }));
 
             const mockSpan = {

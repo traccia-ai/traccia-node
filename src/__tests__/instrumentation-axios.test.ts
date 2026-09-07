@@ -105,7 +105,7 @@ describe('Axios Instrumentation', () => {
             expect(mockSpan.setAttribute).toHaveBeenCalledWith('http.status_code', 200);
         });
 
-        it('skips tracing for Traccia ingest, eval, and prompt-runtime URLs', async () => {
+        it('skips tracing for Traccia ingest, eval, prompt-runtime, and govern URLs', async () => {
             const fresh = loadFresh();
             fresh.patchAxios();
 
@@ -116,11 +116,14 @@ describe('Axios Instrumentation', () => {
                 'https://api.traccia.ai/v2/metrics',
                 'https://api.traccia.ai/v1/metrics',
                 'http://localhost:8001/api/v1/prompt-runtime/prompts/support-reply',
+                'http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/status',
+                'http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/blocks',
+                'https://custom.example/agents/agent-x/status',
             ]) {
                 await mockedAxios.Axios.prototype.request({ method: 'get', url });
             }
 
-            expect(originalProtoRequest).toHaveBeenCalledTimes(6);
+            expect(originalProtoRequest).toHaveBeenCalledTimes(9);
             expect(mockTracer.startActiveSpan).not.toHaveBeenCalled();
         });
 
@@ -205,6 +208,8 @@ describe('Axios Instrumentation', () => {
                     'https://api.traccia.ai/v1/traces',
                     'https://api.traccia.ai/v2/metrics',
                     'https://api.traccia.ai/v1/metrics',
+                    'http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/status',
+                    'http://localhost:8000/api/v1/agents/policy-tool-storm-smoke/blocks',
                 ]) {
                     const response = { status: 200, config: { method: 'post', url } };
                     expect(responseInterceptor(response)).toBe(response);

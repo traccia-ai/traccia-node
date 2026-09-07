@@ -139,9 +139,9 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   setUserId(config.userId);
   setTenantId(config.tenantId);
   setProjectId(config.projectId);
-  setAgentId(process.env.TRACCIA_AGENT_ID || process.env.AGENT_DASHBOARD_AGENT_ID);
-  setAgentName(process.env.TRACCIA_AGENT_NAME || process.env.AGENT_DASHBOARD_AGENT_NAME);
-  setEnv(process.env.TRACCIA_ENV || process.env.AGENT_DASHBOARD_ENV);
+  setAgentId(config.agentId || process.env.TRACCIA_AGENT_ID || process.env.AGENT_DASHBOARD_AGENT_ID);
+  setAgentName(config.agentName || process.env.TRACCIA_AGENT_NAME || process.env.AGENT_DASHBOARD_AGENT_NAME);
+  setEnv(config.env || process.env.TRACCIA_ENV || process.env.AGENT_DASHBOARD_ENV);
 
   const resolvedServiceName = resolveServiceName(
     (config.resource?.['service.name'] as string | undefined) ||

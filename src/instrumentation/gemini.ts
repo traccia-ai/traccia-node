@@ -11,6 +11,7 @@
 
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
+import { enforceLlmCall, finishLlmCall } from '../governance/pep';
 
 let _patched = false;
 
@@ -293,7 +294,9 @@ export function wrapGeminiInteractionsCreate<T>(
                 span.setAttribute(key, value);
             }
 
+            let decision: Record<string, unknown> | undefined;
             try {
+                decision = await enforceLlmCall(kwargs);
                 const response = await createFn.apply(instance || this, args);
 
                 if (!streaming) {
@@ -304,8 +307,10 @@ export function wrapGeminiInteractionsCreate<T>(
                 // span population is intentionally skipped here rather than
                 // read wrong (near-zero) duration and no usage data.
 
+                await finishLlmCall(decision);
                 return response;
             } catch (error) {
+                await finishLlmCall(decision, { release: true }).catch(() => undefined);
                 if (error instanceof Error) {
                     span.recordException(error);
                     span.status = SpanStatus.ERROR;

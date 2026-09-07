@@ -40,6 +40,7 @@ export const DEFAULT_SENSITIVE_KEY_FRAGMENTS: ReadonlySet<string> = new Set([
 export const PROMPT_IDENTITY_KEY_PREFIX = "traccia.prompt.";
 const EVAL_ALLOWLIST_PREFIXES = [
   "traccia.prompt.",
+  "traccia.policy.",
   "traccia.experiment.",
   "traccia.eval.",
   "traccia.dataset.",

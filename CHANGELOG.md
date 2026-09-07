@@ -7,12 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-09-07
+
 ### Added
+- Per-call policy check under `govern()` (`src/governance/pep.ts`): `POST /api/v1/policy/check` on instrumented LLM and tool spans (Spend Cap, Model Boundary, Loop Cap). Optional `checkPolicy()` for custom tools.
+- `init({ agentId, agentName, env })` matching Python `init(agent_id=...)`
+- `observe({ asType: 'tool' })` alias of `type: 'tool'` (Python `as_type="tool"`)
+- `govern()` inherits `agentId` from `init` / `TRACCIA_AGENT_ID`; pass `agentId` only to override
+- README example: instrumented OpenAI + tool observe under `govern()`
 - Gemini (`@google/genai`) auto-instrumentation: `patchGemini()` / `wrapGeminiInteractionsCreate()` for `client.interactions.create` (Interactions API only, `@google/genai` `>=2.9.0`, tested against `2.17.1`)
 - Usage read directly from provider `usage.total_*` fields (`total_input_tokens`, `total_output_tokens`, `total_thought_tokens`, `total_cached_tokens`, `total_tool_use_tokens`, `total_tokens`) — never synthesized from input+output, so thinking/cache/tool-use tokens aren't dropped; `total_tokens` falls back to input+output only when the provider omits it
 - `llm.previous_interaction_id` captured for multi-turn calls; `llm.model` falls back to the response's `model` when the request omits it
 - Streaming (`stream: true`) calls: span is created and tagged `llm.streaming: true`, but usage/completion population is intentionally skipped since `create()` resolves with a `Stream` object before the model has produced output
 - Soft-fails (no crash) when `@google/genai` isn't installed
+- Redaction allowlist for `traccia.policy.*` span attributes (same pattern as `traccia.prompt.*`)
+- HTTP client skip for `@govern()` status/block calls on axios and fetch, matching the Python SDK
+
+### Fixed
+- Policy settle now sends `trace_id` (Spend Cap per-run counters)
+- Policy check HTTP errors return `check_http_error`, matching Python
+- Integer OTel trace/span ids are padded hex, matching Python
 
 ## [0.1.9] - 2026-08-14
 

@@ -33,6 +33,7 @@ describe('governance policy', () => {
       status: 200,
       data: { status: 'allowed' },
     });
+    const post = jest.spyOn(client, 'post');
     _setHttpClientForTests(client);
 
     await checkAgentStatus('agent-1', { failOpen: true });
@@ -43,6 +44,7 @@ describe('governance policy', () => {
         headers: { Authorization: 'Bearer test-key' },
       }),
     );
+    expect(post).not.toHaveBeenCalled();
   });
 
   it('raises AgentBlockedError on hard_block', async () => {

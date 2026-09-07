@@ -4,6 +4,7 @@ export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './dis
 export { govern } from './govern';
 export type { GovernOptions } from './govern';
 export { AgentBlockedError, checkAgentStatus } from './policy';
+export { checkPolicy } from './pep';
 export { configureGovernance, govConfig } from './config';
 export { governanceHooks, GovernanceManager } from './hooks';
 export type { GovernanceHook } from './hooks';

@@ -2,11 +2,15 @@
 import { getTracer } from '../auto';
 import { SpanStatus } from '../types';
 import { ATTR_GUARDRAIL_TRIGGERED, ATTR_GUARDRAIL_NAME, ATTR_GUARDRAIL_CATEGORY } from '../guardrails/constants';
+import { enforceToolCall } from '../governance/pep';
 
 export interface ObserveOptions {
     name?: string;
     attributes?: Record<string, unknown>;
     type?: 'span' | 'tool' | 'llm' | 'guardrail';
+    /** Alias of `type`. Matches Python `as_type=`. */
+    asType?: 'span' | 'tool' | 'llm' | 'guardrail';
+    as_type?: 'span' | 'tool' | 'llm' | 'guardrail';
     skipArgs?: string[];
     skipResult?: boolean;
     tags?: string[];
@@ -62,9 +66,10 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
         const tracer = getTracer('default');
         const name = options.name || defaultName;
 
+        const spanType = options.asType || options.as_type || options.type || 'span';
         const attributes: Record<string, unknown> = {
             ...(options.attributes || {}),
-            'span.type': options.type || 'span',
+            'span.type': spanType,
         };
 
         if (options.tags && options.tags.length > 0) {
@@ -97,11 +102,17 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
             }
 
             try {
-                // Execute original function
+                if (spanType === 'tool') {
+                    const toolArgs =
+                        args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])
+                            ? (args[0] as Record<string, unknown>)
+                            : { args };
+                    await enforceToolCall(name, toolArgs);
+                }
                 const result = await fn.apply(this, args);
 
                 // Auto-set guardrail.triggered if type is guardrail and result is boolean
-                if (options.type === 'guardrail' && typeof result === 'boolean') {
+                if (spanType === 'guardrail' && typeof result === 'boolean') {
                     span.setAttribute(ATTR_GUARDRAIL_TRIGGERED, result);
                 }
 

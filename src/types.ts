@@ -163,6 +163,10 @@ export interface SDKConfig {
    * Hosted Traccia (`https://api.traccia.ai`) does not need this.
    */
   promptApiBase?: string;
+  /** Agent id for cost attribution and policy checks. Also `TRACCIA_AGENT_ID`. */
+  agentId?: string;
+  agentName?: string;
+  env?: string;
 }
 
 /**

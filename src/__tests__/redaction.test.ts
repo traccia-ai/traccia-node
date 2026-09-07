@@ -86,6 +86,17 @@ describe('redactAttributes', () => {
     expect(result['traccia.prompt.version']).toBe('3');
     expect(String(result['llm.prompt'])).toContain('[REDACTED_EMAIL]');
   });
+
+  it('should allowlist traccia.policy.effect', () => {
+    const result = redactAttributes({
+      'traccia.policy.effect': 'deny',
+      'traccia.policy.matched': true,
+      'llm.prompt': 'secret@example.com',
+    });
+    expect(result['traccia.policy.effect']).toBe('deny');
+    expect(result['traccia.policy.matched']).toBe(true);
+    expect(String(result['llm.prompt'])).toContain('[REDACTED_EMAIL]');
+  });
 });
 
 describe('applyRedactionToSpan', () => {

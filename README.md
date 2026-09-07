@@ -23,7 +23,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 - **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy.
 - **High Performance**: Efficient batching, async support, minimal overhead.
 - **W3C Trace Context**: Native distributed tracing header propagation.
-- **Governance & Policies**: Trace evidence enrichment, `disclosure()`, lifecycle hooks, and runtime `govern()` policy enforcement.
+- **Governance & Policies**: Trace evidence, `disclosure()`, and `govern()` which can deny or reshape this LLM or tool call (Spend Cap, Model Boundary, Loop Cap) against the Traccia platform.
 - **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
 - **Prompt Management**: `loadPrompt` / `prefetchPrompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity.
 - **Offline Evaluation**: `evaluate()` runs a task and scorers over a dataset and saves an experiment you can open, compare, and attach on promote.
@@ -293,23 +293,52 @@ Returns `EvaluateResult` with `rows`, `aggregates`, `summary()`, `url`, `experim
 | `observe()` | Observability only | No |
 | `govern()` | Observability + runtime policy enforcement | **Yes** |
 
-`govern()` calls the Traccia agent-status API before each invocation. Tracing-only or self-hosted users should use `observe()`.
+`govern()` does two things:
 
-Policy URLs are derived from your tracing endpoint automatically — no `[governance]` section needed unless you use custom endpoints.
+1. Checks agent status before the function body (can warn or stop the **next** run for after-ingest policies).
+2. Turns on a per-call check for **this** LLM or tool call (Spend Cap, Model Boundary, Loop Cap). You do not call `checkPolicy()` yourself when using an instrumented LLM client and `observe({ asType: 'tool' })`.
+
+Tracing-only or self-hosted users should use `observe()`.
 
 ```typescript
-import { Traccia, govern, AgentBlockedError } from '@traccia/sdk';
+import { OpenAI } from 'openai';
+import { init, observe, govern, AgentBlockedError } from '@traccia/sdk';
 
-await Traccia.init({ apiKey: '...', endpoint: 'https://api.traccia.ai/v2/traces' });
+await init({ apiKey: '...', endpoint: 'https://api.traccia.ai/v2/traces', agentId: 'my-agent' });
+const client = new OpenAI();
+
+const lookupOrder = observe({ name: 'lookup_order', asType: 'tool' })(
+  async (orderId: string) => ({ order_id: orderId, status: 'shipped' }),
+);
 
 const runAgent = govern({
-  agentId: 'my-agent',
   failOpen: false,
   name: 'run_agent',
 })(async (prompt: string) => {
-  return callLlm(prompt);
+  await lookupOrder('ORD-1');
+  const resp = await client.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return resp.choices[0]?.message?.content ?? '';
 });
+
+try {
+  await runAgent('hello');
+} catch (err) {
+  if (err instanceof AgentBlockedError) {
+    console.log(err.reasons, err.decisionId, err.remainingBudgetUsd);
+  }
+}
 ```
+
+Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. `failOpen: true` (default) lets the agent continue if Traccia is unreachable. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match.
+
+`observe({ asType: 'tool' })` matches Python `@observe(as_type="tool")`. `type: 'tool'` still works.
+
+For a custom tool that is **not** wrapped with `observe({ asType: 'tool' })`, call `checkPolicy({ action: { type: 'tool_call', name: 'refund' }, context: { input: { amount } } })` yourself.
+
+Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK guide: [Governance in the SDK](https://traccia.ai/docs/sdk/governance).
 
 **Advanced (optional):** override endpoints in `traccia.toml`:
 

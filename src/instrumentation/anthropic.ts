@@ -7,6 +7,7 @@
 
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
+import { enforceLlmCall, finishLlmCall } from '../governance/pep';
 
 let _patched = false;
 
@@ -110,7 +111,9 @@ export function wrapAnthropicCreate<T>(
                 span.setAttribute(key, value);
             }
 
+            let decision: Record<string, unknown> | undefined;
             try {
+                decision = await enforceLlmCall(kwargs);
                 const response = await createFn.apply(instance || this, args);
 
                 // Extract usage from response
@@ -154,8 +157,10 @@ export function wrapAnthropicCreate<T>(
                     }
                 }
 
+                await finishLlmCall(decision);
                 return response;
             } catch (error) {
+                await finishLlmCall(decision, { release: true }).catch(() => undefined);
                 if (error instanceof Error) {
                     span.recordException(error);
                     span.status = SpanStatus.ERROR;

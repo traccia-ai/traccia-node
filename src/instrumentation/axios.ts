@@ -6,23 +6,9 @@
 
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
+import { shouldSkipHttp } from './http-skip';
 
 let _patched = false;
-
-function shouldSkipHttp(url: string): boolean {
-    return [
-        '/v1/traces',
-        '/v2/traces',
-        '/api/v1/traces',
-        '/api/v2/traces',
-        '/v1/metrics',
-        '/v2/metrics',
-        '/api/v1/metrics',
-        '/api/v2/metrics',
-        '/api/v1/eval-runtime/',
-        '/api/v1/prompt-runtime/',
-    ].some((path) => url.includes(path));
-}
 
 function joinUrl(base: string, path: string): string {
     if (!base) return path;
@@ -139,13 +125,7 @@ export function patchAxios(): boolean {
 
                 // Skip Traccia platform bookkeeping / OTLP (same policy as Python requests patch)
                 const urlStr = String(url || '');
-                if (
-                    urlStr.includes('/api/v1/eval-runtime/') ||
-                    urlStr.includes('/v2/traces') ||
-                    urlStr.includes('/v1/traces') ||
-                    urlStr.includes('/v2/metrics') ||
-                    urlStr.includes('/v1/metrics')
-                ) {
+                if (shouldSkipHttp(urlStr)) {
                     return response;
                 }
 
