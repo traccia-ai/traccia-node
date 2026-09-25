@@ -236,9 +236,13 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
         if (!attrs['span.type'] && !attrs['type']) {
             let spanType: string | undefined;
 
-            if (attrs['llm.model']) {
+            const agentSpanType = String(attrs['agent.span.type'] || '').toLowerCase();
+            if (attrs['llm.model'] || agentSpanType === 'generation') {
                 spanType = 'LLM';
-            } else if (attrs['tool.name'] || attrs['tool'] || attrs['http.url']) {
+            } else if (
+                attrs['tool.name'] || attrs['tool'] || attrs['agent.tool.name']
+                || agentSpanType === 'function'
+            ) {
                 spanType = 'TOOL';
             }
 

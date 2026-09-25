@@ -149,6 +149,27 @@ describe('AgentEnrichmentProcessor', () => {
         mockSpan.attributes = { 'tool.name': 'search' };
         processor.onEnd(mockSpan);
         expect(mockSpan.setAttribute).toHaveBeenCalledWith('span.type', 'TOOL');
+
+        jest.clearAllMocks();
+        mockSpan.attributes = { 'agent.span.type': 'generation' };
+        processor.onEnd(mockSpan);
+        expect(mockSpan.setAttribute).toHaveBeenCalledWith('span.type', 'LLM');
+
+        jest.clearAllMocks();
+        mockSpan.attributes = { 'agent.tool.name': 'web_search' };
+        processor.onEnd(mockSpan);
+        expect(mockSpan.setAttribute).toHaveBeenCalledWith('span.type', 'TOOL');
+
+        jest.clearAllMocks();
+        mockSpan.attributes = { 'agent.span.type': 'function' };
+        processor.onEnd(mockSpan);
+        expect(mockSpan.setAttribute).toHaveBeenCalledWith('span.type', 'TOOL');
+
+        jest.clearAllMocks();
+        mockSpan.attributes = { 'http.url': 'https://example.com/api' };
+        processor.onEnd(mockSpan);
+        expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('span.type', 'TOOL');
+        expect(mockSpan.setAttribute).not.toHaveBeenCalledWith('span.type', 'LLM');
     });
 
     it('implements shutdown and forceFlush', async () => {

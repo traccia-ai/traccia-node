@@ -14,6 +14,9 @@ const BUDGET_TTL_MS = 5000;
 
 let httpClient: AxiosInstance = axios.create({ timeout: 2000 });
 const remainingBudget = new Map<string, { ts: number; value: number }>();
+const lastReads = new Map<string, { tool: string; read_at: string; field: string }>();
+const retrievalByTrace = new Map<string, { present?: boolean; chunk_count?: unknown }>();
+const promptByTrace = new Map<string, { name: string; label?: unknown; version_id?: unknown }>();
 
 export function _setPepHttpClientForTests(client: AxiosInstance): void {
   httpClient = client;
@@ -21,7 +24,128 @@ export function _setPepHttpClientForTests(client: AxiosInstance): void {
 
 export function _resetPepStateForTests(): void {
   remainingBudget.clear();
+  lastReads.clear();
+  retrievalByTrace.clear();
+  promptByTrace.clear();
   httpClient = axios.create({ timeout: 2000 });
+}
+
+export function rememberToolResult(name: string, result: unknown): void {
+  if (!name || !result || typeof result !== 'object' || Array.isArray(result)) {
+    return;
+  }
+  const row = result as Record<string, unknown>;
+  for (const field of ['as_of', 'updated_at'] as const) {
+    const value = row[field];
+    if (value != null && value !== '') {
+      lastReads.set(name, { tool: name, read_at: String(value), field });
+      return;
+    }
+  }
+}
+
+export function noteRetrievalAttributes(
+  traceId: string | undefined,
+  attributes: Record<string, unknown> | undefined,
+): void {
+  if (!traceId || !attributes) {
+    return;
+  }
+  const chunk = attributes['traccia.retrieval.chunk_count'];
+  const presentFlag = attributes['traccia.retrieval.present'];
+  if (chunk == null && presentFlag == null) {
+    return;
+  }
+  const entry = retrievalByTrace.get(traceId) || {};
+  if (presentFlag === true || chunk != null) {
+    entry.present = true;
+  }
+  if (chunk != null) {
+    entry.chunk_count = chunk;
+  }
+  retrievalByTrace.set(traceId, entry);
+}
+
+function freshnessContext(): Array<Record<string, string>> {
+  return Array.from(lastReads.values()).map((item) => ({ ...item }));
+}
+
+function retrievalContext(traceId: string | undefined): Record<string, unknown> {
+  if (!traceId) {
+    return { present: false };
+  }
+  const found = retrievalByTrace.get(traceId);
+  if (!found) {
+    return { present: false };
+  }
+  const out: Record<string, unknown> = { present: Boolean(found.present) };
+  if (found.chunk_count != null) {
+    out.chunk_count = found.chunk_count;
+  }
+  return out;
+}
+
+export function notePromptAttributes(
+  traceId: unknown,
+  attributes?: Record<string, unknown> | null,
+): void {
+  if (!attributes) {
+    return;
+  }
+  const name = attributes['traccia.prompt.name'];
+  if (!name) {
+    return;
+  }
+  const key = asOtelHex(traceId, 32);
+  if (!key) {
+    return;
+  }
+  const entry: { name: string; label?: unknown; version_id?: unknown } = { name: String(name) };
+  if (attributes['traccia.prompt.label']) entry.label = attributes['traccia.prompt.label'];
+  if (attributes['traccia.prompt.version_id']) entry.version_id = attributes['traccia.prompt.version_id'];
+  promptByTrace.set(key, entry);
+}
+
+function promptFromAttributes(attributes?: Record<string, unknown> | null): Record<string, unknown> {
+  if (!attributes) {
+    return {};
+  }
+  const prompt: Record<string, unknown> = {};
+  if (attributes['traccia.prompt.name']) prompt.name = attributes['traccia.prompt.name'];
+  if (attributes['traccia.prompt.label']) prompt.label = attributes['traccia.prompt.label'];
+  if (attributes['traccia.prompt.version_id']) prompt.version_id = attributes['traccia.prompt.version_id'];
+  return prompt;
+}
+
+function promptContext(): Record<string, unknown> {
+  const span = getCurrentSpan();
+  const fromSpan = promptFromAttributes(span?.attributes as Record<string, unknown> | undefined);
+  if (fromSpan.name) {
+    return fromSpan;
+  }
+  const traceId = asOtelHex(span?.context?.traceId, 32);
+  if (!traceId) {
+    return fromSpan;
+  }
+  const remembered = promptByTrace.get(traceId);
+  if (!remembered) {
+    return fromSpan;
+  }
+  const prompt: Record<string, unknown> = { name: remembered.name };
+  if (remembered.label) prompt.label = remembered.label;
+  if (remembered.version_id) prompt.version_id = remembered.version_id;
+  return prompt;
+}
+
+function customerId(args: Record<string, unknown>): string | undefined {
+  const customer = args.customer;
+  if (customer && typeof customer === 'object' && !Array.isArray(customer)) {
+    const id = (customer as Record<string, unknown>).id;
+    if (id != null && id !== '') {
+      return String(id);
+    }
+  }
+  return undefined;
 }
 
 function asOtelHex(value: unknown, width: number): string | undefined {
@@ -59,6 +183,10 @@ function stampSpan(decision: Record<string, unknown>): void {
     span.setAttribute('traccia.policy.effect', String(decision.effect));
   }
   span.setAttribute('traccia.policy.would_have', Boolean(decision.would_have));
+  const activation = decision.activation;
+  if (activation === 'observe' || activation === 'warn' || activation === 'block') {
+    span.setAttribute('traccia.policy.activation', String(activation));
+  }
   const ids = decision.policy_ids as string[] | undefined;
   if (ids && ids.length) {
     span.setAttribute('traccia.policy.ids', ids.join(','));
@@ -217,13 +345,21 @@ export async function enforceLlmCall(kwargs: Record<string, unknown>): Promise<R
     return undefined;
   }
   const model = kwargs.model;
+  const span = getCurrentSpan();
+  const traceId = asOtelHex(span?.context?.traceId, 32);
+  const context: Record<string, unknown> = {
+    model,
+    max_tokens: kwargs.max_tokens || kwargs.max_completion_tokens,
+    input_tokens: estimateTokens(kwargs),
+    retrieval: retrievalContext(traceId),
+  };
+  const prompt = promptContext();
+  if (Object.keys(prompt).length) {
+    context.prompt = prompt;
+  }
   const decision = await checkPolicy({
     action: { type: 'llm_call', name: 'llm_call', model },
-    context: {
-      model,
-      max_tokens: kwargs.max_tokens || kwargs.max_completion_tokens,
-      input_tokens: estimateTokens(kwargs),
-    },
+    context,
   });
   if (decision.effect === 'reshape' && !decision.would_have) {
     const obligations = (decision.obligations as Record<string, unknown>) || {};
@@ -252,8 +388,17 @@ export async function enforceToolCall(
   if (!pepEnabled()) {
     return undefined;
   }
+  const context: Record<string, unknown> = { input: args, tool_name: name };
+  const freshness = freshnessContext();
+  if (freshness.length) {
+    context.freshness = freshness;
+  }
+  const id = customerId(args);
+  if (id) {
+    context.customer_id = id;
+  }
   return checkPolicy({
     action: { type: 'tool_call', name },
-    context: { input: args, tool_name: name },
+    context,
   });
 }
