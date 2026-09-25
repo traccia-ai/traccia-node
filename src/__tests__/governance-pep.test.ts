@@ -5,12 +5,15 @@ import {
   checkPolicy,
   enforceLlmCall,
   enforceToolCall,
+  noteRetrievalAttributes,
+  rememberToolResult,
   settlePolicy,
   _asOtelHexForTests,
   _setPepHttpClientForTests,
   _resetPepStateForTests,
 } from '../governance/pep';
 import { runIdentity } from '../config/runtime-config';
+import * as spanContext from '../context/context';
 
 jest.mock('../config/config', () => ({
   loadConfig: jest.fn(() => ({
@@ -124,6 +127,88 @@ describe('governance pep', () => {
     });
     expect(post.mock.calls[0][1]).toMatchObject({
       action: { type: 'tool_call', name: 'search' },
+      context: { input: { q: 'x' }, tool_name: 'search' },
+    });
+  });
+
+  it('raises AgentBlockedError on a refund amount deny', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        id: 'dec-refund',
+        effect: 'deny',
+        would_have: false,
+        reasons: ['Refund Guard amount $80.000 is above $50.000'],
+        obligations: {},
+      },
+    });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await expect(enforceToolCall('issue_refund', { amount: 80 })).rejects.toEqual(
+        expect.objectContaining({
+          name: 'AgentBlockedError',
+          decisionId: 'dec-refund',
+          message: expect.stringContaining('above'),
+        }),
+      );
+    });
+    expect(post.mock.calls[0][1]).toMatchObject({
+      action: { type: 'tool_call', name: 'issue_refund' },
+      context: { input: { amount: 80 }, tool_name: 'issue_refund' },
+    });
+  });
+
+  it('raises AgentBlockedError on a high-risk tool name deny', async () => {
+    const client = axios.create();
+    jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        id: 'dec-risk',
+        effect: 'deny',
+        would_have: false,
+        reasons: ['High-Risk Tool delete_account is not allowed unsupervised'],
+        obligations: {},
+      },
+    });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await expect(enforceToolCall('delete_account', {})).rejects.toEqual(
+        expect.objectContaining({
+          name: 'AgentBlockedError',
+          message: expect.stringContaining('delete_account'),
+        }),
+      );
+    });
+  });
+
+  it('raises AgentBlockedError on a dangerous shell pattern deny', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        id: 'dec-shell',
+        effect: 'deny',
+        would_have: false,
+        reasons: ['Dangerous Shell Commands matched rm -rf'],
+        obligations: {},
+      },
+    });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await expect(enforceToolCall('shell', { command: 'rm -rf /' })).rejects.toEqual(
+        expect.objectContaining({
+          name: 'AgentBlockedError',
+          message: expect.stringContaining('rm -rf'),
+        }),
+      );
+    });
+    expect(post.mock.calls[0][1]).toMatchObject({
+      action: { type: 'tool_call', name: 'shell' },
+      context: { input: { command: 'rm -rf /' }, tool_name: 'shell' },
     });
   });
 
@@ -177,6 +262,79 @@ describe('governance pep', () => {
       actual_usd: 0.1,
     });
     expect(post.mock.calls[0][1]).toHaveProperty('trace_id');
+  });
+
+  it('sends the last read timestamp and customer id on a write check', async () => {
+    rememberToolResult('search', { q: 'x' });
+    rememberToolResult('get_refund_policy', { as_of: '2026-09-24T11:40:00Z', text: 'policy' });
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-fresh', effect: 'allow', would_have: false, reasons: [] },
+    });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceToolCall('issue_refund', { amount: 10, customer: { id: 'alice' } });
+    });
+    const body = post.mock.calls[0][1] as { context: { freshness: unknown[]; customer_id: string } };
+    expect(body.context.freshness).toEqual(
+      expect.arrayContaining([
+        { tool: 'get_refund_policy', read_at: '2026-09-24T11:40:00Z', field: 'as_of' },
+      ]),
+    );
+    expect(body.context.customer_id).toBe('alice');
+  });
+
+  it('sends prompt pin fields and a real retrieval count on the LLM check', async () => {
+    noteRetrievalAttributes('abc', { 'traccia.retrieval.chunk_count': 4 });
+    jest.spyOn(spanContext, 'getCurrentSpan').mockReturnValue({
+      context: { traceId: 'abc', spanId: 'def', traceFlags: 1 },
+      attributes: {
+        'traccia.prompt.name': 'refund-policy',
+        'traccia.prompt.label': 'production',
+        'traccia.prompt.version_id': 'ver-1',
+      },
+      setAttribute: jest.fn(),
+    } as never);
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-pin', effect: 'allow', would_have: false, reasons: [] },
+    });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceLlmCall({ model: 'gpt-4o-mini' });
+    });
+    const body = post.mock.calls[0][1] as {
+      context: { prompt: Record<string, string>; retrieval: { present: boolean; chunk_count?: number } };
+    };
+    expect(body.context.prompt).toEqual({
+      name: 'refund-policy',
+      label: 'production',
+      version_id: 'ver-1',
+    });
+    expect(body.context.retrieval.present).toBe(true);
+    expect(body.context.retrieval.chunk_count).toBe(4);
+  });
+
+  it('omits prompt fields and does not invent a chunk count', async () => {
+    jest.spyOn(spanContext, 'getCurrentSpan').mockReturnValue({
+      context: { traceId: 'plain', spanId: 'span', traceFlags: 1 },
+      attributes: {},
+      setAttribute: jest.fn(),
+    } as never);
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-plain', effect: 'allow', would_have: false, reasons: [] },
+    });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceLlmCall({ model: 'gpt-4o-mini' });
+    });
+    const body = post.mock.calls[0][1] as { context: Record<string, unknown> };
+    expect(body.context.prompt).toBeUndefined();
+    expect(body.context.retrieval).toEqual({ present: false });
   });
 });
 

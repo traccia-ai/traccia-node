@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Agent enricher matches Python: `agent.span.type` of `generation` is an LLM span, and `agent.tool.name` or `function` is a tool. `http.url` alone does not make a tool span.
+
 ## [0.1.14] - 2026-09-07
 
 ### Added

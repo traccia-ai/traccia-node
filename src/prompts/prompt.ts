@@ -3,6 +3,7 @@
  */
 
 import { getCurrentSpan } from '../context/context';
+import { notePromptAttributes } from '../governance/pep';
 import { compileBody, CompileError } from './compile';
 
 export const ATTR_PROMPT_ID = 'traccia.prompt.id';
@@ -141,9 +142,12 @@ export class LoadedPrompt {
     try {
       const target = span ?? getCurrentSpan();
       if (!target || typeof target.setAttribute !== 'function') return;
-      for (const [k, v] of Object.entries(this.spanAttributes())) {
+      const attrs = this.spanAttributes();
+      for (const [k, v] of Object.entries(attrs)) {
         target.setAttribute(k, v);
       }
+      const traceId = (target as { context?: { traceId?: unknown } }).context?.traceId;
+      notePromptAttributes(traceId, attrs);
     } catch {
       // best-effort
     }

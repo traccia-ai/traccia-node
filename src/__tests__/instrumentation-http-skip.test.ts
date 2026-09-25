@@ -20,6 +20,9 @@ describe('shouldSkipHttp', () => {
     ).toBe(true);
     expect(shouldSkipHttp('https://app.traccia.ai/api/v1/policy/check')).toBe(true);
     expect(shouldSkipHttp('http://localhost:8001/api/v1/policy/settle')).toBe(true);
+    expect(
+      shouldSkipHttp('https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken'),
+    ).toBe(true);
   });
 
   it('does not skip ordinary HTTP', () => {

@@ -2,7 +2,7 @@
 import { getTracer } from '../auto';
 import { SpanStatus } from '../types';
 import { ATTR_GUARDRAIL_TRIGGERED, ATTR_GUARDRAIL_NAME, ATTR_GUARDRAIL_CATEGORY } from '../guardrails/constants';
-import { enforceToolCall } from '../governance/pep';
+import { enforceToolCall, noteRetrievalAttributes, rememberToolResult } from '../governance/pep';
 
 export interface ObserveOptions {
     name?: string;
@@ -110,6 +110,10 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
                     await enforceToolCall(name, toolArgs);
                 }
                 const result = await fn.apply(this, args);
+                if (spanType === 'tool') {
+                    rememberToolResult(name, result);
+                }
+                noteRetrievalAttributes(span.context?.traceId, span.attributes);
 
                 // Auto-set guardrail.triggered if type is guardrail and result is boolean
                 if (spanType === 'guardrail' && typeof result === 'boolean') {
