@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { shouldSkipHttp } from '../instrumentation/http-skip';
-import { AgentBlockedError } from '../governance/policy';
+import { AgentBlockedError, ApprovalPending, pendingToolResult } from '../governance/policy';
 import {
   checkPolicy,
   enforceLlmCall,
@@ -157,6 +157,50 @@ describe('governance pep', () => {
     expect(post.mock.calls[0][1]).toMatchObject({
       action: { type: 'tool_call', name: 'issue_refund' },
       context: { input: { amount: 80 }, tool_name: 'issue_refund' },
+    });
+  });
+
+  it('raises ApprovalPending on a held refund and not AgentBlockedError', async () => {
+    const client = axios.create();
+    jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        id: 'dec-queue',
+        effect: 'queue',
+        would_have: false,
+        approval_id: 'appr-1',
+        approval_expires_at: '2026-10-06T00:15:00+00:00',
+        reasons: ['needs approval'],
+      },
+    });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      try {
+        await enforceToolCall('issue_refund', { amount: 40 });
+        throw new Error('expected ApprovalPending');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ApprovalPending);
+        expect(err).not.toBeInstanceOf(AgentBlockedError);
+        expect(pendingToolResult(err as ApprovalPending)).toEqual({
+          status: 'pending_approval',
+          approval_id: 'appr-1',
+          expires_at: '2026-10-06T00:15:00+00:00',
+        });
+      }
+    });
+  });
+
+  it('returns a would-have queue without throwing', async () => {
+    const client = axios.create();
+    jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-wh', effect: 'queue', would_have: true, reasons: ['needs approval'] },
+    });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      const out = await enforceToolCall('issue_refund', { amount: 40 });
+      expect(out?.would_have).toBe(true);
     });
   });
 

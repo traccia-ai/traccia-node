@@ -3,7 +3,7 @@ export { disclosure, enrichGovernanceAttributes } from './disclosure';
 export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './disclosure';
 export { govern } from './govern';
 export type { GovernOptions } from './govern';
-export { AgentBlockedError, checkAgentStatus } from './policy';
+export { AgentBlockedError, ApprovalPending, pendingToolResult, checkAgentStatus } from './policy';
 export { checkPolicy } from './pep';
 export { configureGovernance, govConfig } from './config';
 export { governanceHooks, GovernanceManager } from './hooks';

@@ -9,6 +9,36 @@ import { govConfig } from './config';
 const DEFAULT_STATUS_PATH = '/api/v1/agents/{agent_id}/status';
 const DEFAULT_BLOCK_PATH = '/api/v1/agents/{agent_id}/blocks';
 
+export class ApprovalPending extends Error {
+  approvalId?: string;
+  expiresAt?: string;
+  decisionId?: string;
+
+  constructor(
+    message: string,
+    extras?: { approvalId?: string; expiresAt?: string; decisionId?: string },
+  ) {
+    super(message);
+    this.name = 'ApprovalPending';
+    this.approvalId = extras?.approvalId;
+    this.expiresAt = extras?.expiresAt;
+    this.decisionId = extras?.decisionId;
+  }
+}
+
+/** A normal tool result for frameworks that retry raised errors. Do not call the tool again. */
+export function pendingToolResult(error: ApprovalPending): {
+  status: 'pending_approval';
+  approval_id?: string;
+  expires_at?: string;
+} {
+  return {
+    status: 'pending_approval',
+    approval_id: error.approvalId,
+    expires_at: error.expiresAt,
+  };
+}
+
 export class AgentBlockedError extends Error {
   decisionId?: string;
   remainingBudgetUsd?: number | null;

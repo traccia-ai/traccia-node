@@ -6,7 +6,7 @@ import axios, { AxiosInstance } from 'axios';
 import { loadConfig } from '../config/config';
 import { getAgentId, pepEnabled } from '../config/runtime-config';
 import { getCurrentSpan } from '../context/context';
-import { AgentBlockedError } from './policy';
+import { AgentBlockedError, ApprovalPending } from './policy';
 
 const CHECK_PATH = '/api/v1/policy/check';
 const SETTLE_PATH = '/api/v1/policy/settle';
@@ -265,6 +265,16 @@ export async function checkPolicy(input: {
     if (decision.would_have) {
       return decision;
     }
+    if (decision.effect === 'queue') {
+      throw new ApprovalPending(
+        'This action is waiting for approval. Do not run the tool or retry the check.',
+        {
+          approvalId: decision.approval_id as string | undefined,
+          expiresAt: decision.approval_expires_at as string | undefined,
+          decisionId: decision.id as string | undefined,
+        },
+      );
+    }
     if (decision.effect === 'deny') {
       throw new AgentBlockedError(blockedMessage(decision), {
         decisionId: decision.id as string | undefined,
@@ -274,7 +284,7 @@ export async function checkPolicy(input: {
     }
     return decision;
   } catch (error) {
-    if (error instanceof AgentBlockedError) {
+    if (error instanceof AgentBlockedError || error instanceof ApprovalPending) {
       throw error;
     }
     if (axios.isAxiosError(error) && error.response) {

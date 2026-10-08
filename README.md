@@ -23,7 +23,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 - **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy.
 - **High Performance**: Efficient batching, async support, minimal overhead.
 - **W3C Trace Context**: Native distributed tracing header propagation.
-- **Governance & Policies**: Trace evidence, `disclosure()`, and `govern()` which can deny or reshape this LLM or tool call (Spend Cap, Model Boundary, Loop Cap) against the Traccia platform.
+- **Governance & Policies**: Trace evidence, `disclosure()`, and `govern()` which can deny or reshape this LLM or tool call (Spend Cap, Model Boundary, Loop Cap) against the Traccia platform. Refund Guard and Purchase Guard can also hold a tool for a person (`ApprovalPending`).
 - **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
 - **Prompt Management**: `loadPrompt` / `prefetchPrompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity.
 - **Offline Evaluation**: `evaluate()` runs a task and scorers over a dataset and saves an experiment you can open, compare, and attach on promote.
@@ -332,7 +332,7 @@ try {
 }
 ```
 
-Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. `failOpen: true` (default) lets the agent continue if Traccia is unreachable. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match.
+Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. `failOpen: true` (default) lets the agent continue if Traccia is unreachable. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `govern()` throws `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pendingToolResult()` is a normal tool result when a framework retries raised errors.
 
 `observe({ asType: 'tool' })` matches Python `@observe(as_type="tool")`. `type: 'tool'` still works.
 

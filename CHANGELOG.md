@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-10-08
+
+### Added
+- `ApprovalPending` is raised when Refund Guard or Purchase Guard holds a tool for a person. It is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pendingToolResult()` is a normal tool result for frameworks that retry raised errors
+
 ## [0.1.17] - 2026-10-03
 
 Includes the changes tagged `v0.1.15` and `v0.1.16` on GitHub, which were never published to npm.
