@@ -183,6 +183,8 @@ export {
   wrapAnthropicCreate,
   patchGemini,
   wrapGeminiInteractionsCreate,
+  patchGroq,
+  wrapGroqChatCompletionsCreate,
   patchAxios,
   createTracedAxios,
   patchFetch,

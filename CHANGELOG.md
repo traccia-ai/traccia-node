@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `CostResolver.compute()`, `computeDetailed()`, and `matchPricingModelKey()` take an optional `vendor`. `computeDetailed()` also returns the match
 - `PriceMatch.ambiguous` is true when the vendor did not settle which of several providers' keys was used
 - `enforceLlmCall()` takes an optional `vendor` and sends it with the policy check, so Spend Cap uses that provider's price. The OpenAI, Anthropic and Gemini integrations pass it
+- Groq (`groq-sdk`) chat completions are traced. `init()` patches `client.chat.completions.create` for regular and streaming calls; `wrapGroqChatCompletionsCreate()` wraps a client by hand (for apps that load `groq-sdk` as an ES module). `create()` keeps `.withResponse()` and `.asResponse()`
+- A streamed Groq call's span stays open until the stream is read, stopped early, aborted, or garbage collected, then records the full completion and token usage. Aborts are marked `aborted` and release the governance reservation. Settlement runs as the agent that made the call
 
 ### Fixed
 - The API key and endpoint passed to `init()` are now used by policy checks, `govern()` status checks, prompts and evals, not only by tracing. Before, policy checks were skipped with `missing_credentials` and `loadPrompt` threw `PromptFetchError` unless the key was also in the environment or a config file. Arguments passed to a single call still take priority

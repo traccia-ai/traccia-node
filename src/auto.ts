@@ -41,6 +41,7 @@ import { SDKConfig, ISpanExporter, ITracer } from './types';
 import { configureGovernance } from './governance/config';
 import { configurePrompts } from './prompts';
 import { patchGemini } from './instrumentation/gemini';
+import { patchGroq } from './instrumentation/groq';
 import { patchAxios } from './instrumentation/axios';
 import { patchOpenAI, patchOpenAIResponses } from './instrumentation/openai';
 import { patchAnthropic } from './instrumentation/anthropic';
@@ -317,6 +318,11 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   if (loadedConfig.instrumentation.enable_patching !== false) {
     try {
       patchGemini();
+    } catch {
+      /* optional peer */
+    }
+    try {
+      patchGroq();
     } catch {
       /* optional peer */
     }
