@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Local cost estimates match pricing keys the same way as the Python SDK and the platform. Names match on their base name, without the provider path (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`), a Bedrock region (`us.`), or a date or `-latest` suffix. When several providers list the model, the span's `llm.vendor` price wins, then the shortest key
+- Spans record `llm.pricing.match_kind` (`exact` or `base`) and `llm.pricing.provider` next to `llm.pricing.model_key`
+- `CostResolver.compute()`, `computeDetailed()`, and `matchPricingModelKey()` take an optional `vendor`. `computeDetailed()` also returns the match
+
+### Fixed
+- Model ids with an organisation prefix (`openai/gpt-oss-120b`, `qwen/qwen3-32b` on Groq) get a cost. They previously matched no pricing key
+- A model listed by several providers is priced at the calling provider's rate
+
+### Changed
+- No more prefix matching: a model name that matches no pricing key after the steps above (for example a fine-tuned `gpt-4o-mini-ft-…`) gets no cost instead of the price of a model whose name it starts with
+
 ## [0.1.18] - 2026-10-08
 
 ### Added
