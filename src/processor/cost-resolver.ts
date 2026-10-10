@@ -3,6 +3,7 @@
  */
 
 import { PricingRates, PricingTable, DEFAULT_PRICING } from '../config/pricing-config';
+import { matchModel, PriceMatch } from './pricing-matcher';
 
 export class CostResolver {
   private table: PricingTable;
@@ -58,8 +59,9 @@ export class CostResolver {
     completionTokens: number,
     cacheReadTokens = 0,
     cacheWriteTokens = 0,
+    vendor?: string,
   ): number | undefined {
-    return this.computeDetailed(model, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens)?.cost;
+    return this.computeDetailed(model, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, vendor)?.cost;
   }
 
   public computeDetailed(
@@ -68,13 +70,14 @@ export class CostResolver {
     completionTokens: number,
     cacheReadTokens = 0,
     cacheWriteTokens = 0,
-  ): { cost: number; cacheFallback: boolean } | undefined {
-    const matched = this.lookupPrice(model);
-    if (!matched) {
+    vendor?: string,
+  ): { cost: number; cacheFallback: boolean; match: PriceMatch } | undefined {
+    const match = matchModel(model, this.table, vendor);
+    if (!match) {
       return undefined;
     }
 
-    const [, pricing] = matched;
+    const pricing = this.table[match.key];
     const inputRate = rate(pricing, "inputCost", "prompt");
     const outputRate = rate(pricing, "outputCost", "completion");
     let cost = 0;
@@ -93,48 +96,11 @@ export class CostResolver {
     }
 
     if (cost <= 0) return undefined;
-    return { cost, cacheFallback };
+    return { cost, cacheFallback, match };
   }
 
-  public matchPricingModelKey(model: string): string | undefined {
-    return this.lookupPrice(model)?.[0];
-  }
-
-  private lookupPrice(model: string): [string, PricingRates] | undefined {
-    const normalized = String(model || '').trim();
-    if (!normalized) {
-      return undefined;
-    }
-
-    if (this.table[normalized]) {
-      return [normalized, this.table[normalized]];
-    }
-
-    const lower = normalized.toLowerCase();
-    for (const [key, value] of Object.entries(this.table)) {
-      if (key.toLowerCase() === lower) {
-        return [key, value];
-      }
-    }
-
-    const keys = Object.keys(this.table).sort((a, b) => b.length - a.length);
-    const suffixHits: Array<[string, PricingRates]> = [];
-    for (const [key, value] of Object.entries(this.table)) {
-      if (modelTail(key).toLowerCase() === lower) {
-        suffixHits.push([key, value]);
-      }
-    }
-    if (suffixHits.length) {
-      suffixHits.sort((a, b) => a[0].length - b[0].length);
-      return suffixHits[0];
-    }
-    for (const key of keys) {
-      if (lower.startsWith(key.toLowerCase())) {
-        return [key, this.table[key]];
-      }
-    }
-
-    return undefined;
+  public matchPricingModelKey(model: string, vendor?: string): string | undefined {
+    return matchModel(model, this.table, vendor)?.key;
   }
 
   public snapshot(): { table: PricingTable; source: string; generatedAt: string } {
@@ -170,15 +136,4 @@ function rate(pricing: PricingRates, primary: keyof PricingRates, alias: keyof P
 function optionalRate(pricing: PricingRates, primary: keyof PricingRates, alias: keyof PricingRates): number | undefined {
   const value = pricing[primary] ?? pricing[alias];
   return typeof value === "number" ? value : undefined;
-}
-
-function modelTail(key: string): string {
-  const tail = key.replace(/\\/g, "/").split("/").pop() ?? key;
-  const dot = tail.indexOf(".");
-  if (dot > 0) {
-    const head = tail.slice(0, dot);
-    const rest = tail.slice(dot + 1);
-    if (/^[a-z][a-z0-9-]*$/i.test(head) && rest.includes("-")) return rest;
-  }
-  return tail;
 }
