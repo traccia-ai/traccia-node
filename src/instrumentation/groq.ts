@@ -37,7 +37,17 @@ interface GroqApiPromise extends PromiseLike<unknown> {
 /** The parts of groq-sdk's Stream the wrapper relies on. */
 interface GroqStream {
   iterator?: () => AsyncIterator<unknown>;
-  controller?: { signal?: { aborted?: boolean } };
+  controller?: {
+    signal?: {
+      aborted?: boolean;
+      addEventListener?: (
+        type: 'abort',
+        listener: () => void,
+        options?: { once?: boolean }
+      ) => void;
+      removeEventListener?: (type: 'abort', listener: () => void) => void;
+    };
+  };
 }
 
 type Outcome =
@@ -173,8 +183,8 @@ const FinalizationRegistryCtor = (
   }
 ).FinalizationRegistry;
 
-// A stream dropped before it is read to the end or closed still ends its span.
-const abandonedStreams = FinalizationRegistryCtor
+// A stream or promise dropped before its data is read still ends its span.
+const abandoned = FinalizationRegistryCtor
   ? new FinalizationRegistryCtor((state) => {
       void state.finalize({ kind: 'success' });
     })
@@ -182,13 +192,16 @@ const abandonedStreams = FinalizationRegistryCtor
 
 /**
  * Span and governance state for one create() call. Holds no reference to the response or
- * stream, so it can be the held value for abandonedStreams.
+ * stream, so it can be the held value for abandoned.
  */
 class CallState {
   /** Async context of the create() call: run identity, PEP flag, and this span as current. */
   public scope: AsyncResource | undefined;
   public decision: Record<string, unknown> | undefined;
+  /** next()/return() calls in progress. groq-sdk's own aborts happen inside them. */
+  public iterating = 0;
   private done = false;
+  private detachAbort: (() => void) | undefined;
   private readonly parts: string[] = [];
   private respModel: unknown;
   private usage: unknown;
@@ -240,7 +253,24 @@ class CallState {
     stream.iterator = function tracedIterator(this: unknown): AsyncIterator<unknown> {
       return traceIterator(original.call(this) as AsyncIterator<unknown>, state, stream);
     };
-    abandonedStreams?.register(stream as object, this, this);
+    abandoned?.register(stream as object, this, this);
+    const signal = stream.controller?.signal;
+    if (signal) {
+      // An abort while no read is in progress ends the span now. groq-sdk also aborts the
+      // request when a loop stops early or fails, but only inside next()/return(), which
+      // record those outcomes themselves.
+      const onAbort = (): void => {
+        if (state.iterating === 0) {
+          void state.finalize({ kind: 'aborted' });
+        }
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else if (signal.addEventListener) {
+        signal.addEventListener('abort', onAbort, { once: true });
+        this.detachAbort = (): void => signal.removeEventListener?.('abort', onAbort);
+      }
+    }
   }
 
   /**
@@ -252,7 +282,8 @@ class CallState {
       return;
     }
     this.done = true;
-    abandonedStreams?.unregister(this);
+    abandoned?.unregister(this);
+    this.detachAbort?.();
     const run = async (): Promise<void> => {
       try {
         if (outcome.kind === 'success') {
@@ -277,6 +308,8 @@ class CallState {
           }
           await finishLlmCall(this.decision).catch(() => undefined);
         } else {
+          // Keep the text that arrived before the abort or error, as a stopped loop does.
+          recordCompletion(this.span, this.parts.join('') || undefined, undefined, this.respModel);
           if (outcome.kind === 'error' && outcome.error instanceof Error) {
             this.span.recordException(outcome.error);
           }
@@ -313,11 +346,14 @@ function traceIterator(
   return {
     async next(...args: [] | [unknown]): Promise<IteratorResult<unknown>> {
       let result: IteratorResult<unknown>;
+      state.iterating++;
       try {
         result = await it.next(...args);
       } catch (error: unknown) {
         await state.finalize({ kind: 'error', error });
         throw error;
+      } finally {
+        state.iterating--;
       }
       if (result.done) {
         await state.finalize(aborted() ? { kind: 'aborted' } : { kind: 'success' });
@@ -330,11 +366,13 @@ function traceIterator(
       // Read before it.return(): groq-sdk aborts the request itself when a loop stops early,
       // which must not be mistaken for the caller aborting.
       const wasAborted = aborted();
+      state.iterating++;
       try {
         return it.return
           ? await it.return(value)
           : ({ done: true, value } as IteratorResult<unknown>);
       } finally {
+        state.iterating--;
         await state.finalize(wasAborted ? { kind: 'aborted' } : { kind: 'success' });
       }
     },
@@ -357,7 +395,6 @@ function traceIterator(
  */
 class GroqCall {
   public started: Promise<{ api: GroqApiPromise }>;
-  private parseRequested = false;
 
   public constructor(
     public readonly state: CallState,
@@ -365,7 +402,6 @@ class GroqCall {
   ) {}
 
   public parse(): Promise<unknown> {
-    this.parseRequested = true;
     return this.started
       .then(({ api }) => api)
       .then(
@@ -392,19 +428,10 @@ class GroqCall {
         }
         return api.asResponse();
       })
-      .then(
-        async (response) => {
-          // asResponse() alone leaves the body unread, so there is nothing more to record.
-          if (!this.parseRequested) {
-            await this.state.finalize({ kind: 'success' });
-          }
-          return response;
-        },
-        async (error: unknown) => {
-          await this.state.finalize({ kind: 'error', error });
-          throw error;
-        }
-      );
+      .catch(async (error: unknown) => {
+        await this.state.finalize({ kind: 'error', error });
+        throw error;
+      });
   }
 }
 
@@ -429,6 +456,7 @@ class TracedApiPromise<T> extends Promise<T> {
 
   private parse(): Promise<T> {
     if (this.parsedPromise === undefined) {
+      abandoned?.unregister(this.call);
       this.parsedPromise = this.call.parse() as Promise<T>;
     }
     return this.parsedPromise;
@@ -453,6 +481,11 @@ class TracedApiPromise<T> extends Promise<T> {
 
   /** The raw `Response`, with the body unread. */
   public asResponse(): Promise<unknown> {
+    if (this.parsedPromise === undefined) {
+      // The caller may still await the data. If it never does, the span ends when this
+      // promise is garbage collected.
+      abandoned?.register(this, this.call.state, this.call);
+    }
     return this.call.asResponse();
   }
 
@@ -470,15 +503,15 @@ class TracedApiPromise<T> extends Promise<T> {
  * @param instance - The Completions instance to call it on, or null to use `this`
  * @returns The traced create method
  */
-export function wrapGroqChatCompletionsCreate<T>(
-  createFn: (...args: unknown[]) => T,
+export function wrapGroqChatCompletionsCreate<F extends (...args: never[]) => unknown>(
+  createFn: F,
   instance: unknown
-): (...args: unknown[]) => T {
-  const existing = createFn as PatchedFn;
-  if (existing._agentTracePatched) {
+): F {
+  const original = createFn as unknown as PatchedFn;
+  if (original._agentTracePatched) {
     return createFn;
   }
-  const wrapped = function wrappedCreate(this: unknown, ...args: unknown[]): T {
+  const wrapped = function wrappedCreate(this: unknown, ...args: unknown[]): unknown {
     const kwargs = (args[0] || {}) as Record<string, unknown>;
     const messages = extractMessages(kwargs);
     const promptText = extractPromptText(messages);
@@ -517,14 +550,14 @@ export function wrapGroqChatCompletionsCreate<T>(
         span.setAttribute('llm.model', kwargs.model);
       }
       // Wrapped in an object so the APIPromise is not awaited (and parsed) here.
-      return { api: createFn.apply(thisArg, args) as GroqApiPromise };
+      return { api: original.apply(thisArg, args) as GroqApiPromise };
     });
     // The caller observes failures through the returned promise.
     call.started.catch(() => undefined);
-    return new TracedApiPromise(call) as unknown as T;
+    return new TracedApiPromise(call);
   } as PatchedFn;
   wrapped._agentTracePatched = true;
-  return wrapped as (...args: unknown[]) => T;
+  return wrapped as unknown as F;
 }
 
 type CompletionsClass = { prototype?: { create?: PatchedFn } };
@@ -569,7 +602,7 @@ export function patchGroq(): boolean {
       return false;
     }
     if (!proto.create._agentTracePatched) {
-      proto.create = wrapGroqChatCompletionsCreate(proto.create, null) as PatchedFn;
+      proto.create = wrapGroqChatCompletionsCreate(proto.create, null);
     }
     _patched = true;
     return true;

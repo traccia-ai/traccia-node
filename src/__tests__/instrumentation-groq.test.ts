@@ -338,6 +338,19 @@ describe('Groq Instrumentation', () => {
       expect(response).toBe(api.response);
       expect(api.parses).toBe(0);
       expect(mockSpan.attributes['llm.completion']).toBeUndefined();
+      // The data may still be awaited, so the span stays open.
+      expect(settles).toHaveLength(0);
+      expect(mockSpan.endCount).toBe(0);
+    });
+
+    it('asResponse() and then awaiting the data records the completion and usage', async () => {
+      const api = new FakeAPIPromise(RESPONSE);
+      const { traced } = wrap(() => api);
+      const promise = traced({ model: 'm', messages: MSGS });
+      expect(await promise.asResponse()).toBe(api.response);
+      expect(await promise).toBe(RESPONSE);
+      expect(mockSpan.attributes['llm.completion']).toBe('Paris.');
+      expect(mockSpan.attributes['llm.usage.total_tokens']).toBe(16);
       expect(settles).toHaveLength(1);
       expect(mockSpan.endCount).toBe(1);
     });
@@ -464,9 +477,36 @@ describe('Groq Instrumentation', () => {
         stream.controller.abort();
       }
       expect(text).toBe('Par');
+      expect(mockSpan.attributes['llm.completion']).toBe('Par');
       expect(mockSpan.status).toBe(SpanStatus.ERROR);
       expect(mockSpan.statusDescription).toBe('aborted');
       expect(settles).toEqual([expect.objectContaining({ opts: { release: true } })]);
+      expect(mockSpan.endCount).toBe(1);
+    });
+
+    it('aborting a retained stream that is not being read ends the span at once', async () => {
+      const stream = new FakeStream(CHUNKS);
+      const { traced } = streamWrap(stream);
+      const result = await traced({ model: 'm', messages: MSGS, stream: true });
+      stream.controller.abort();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(result).toBe(stream);
+      expect(mockSpan.status).toBe(SpanStatus.ERROR);
+      expect(mockSpan.statusDescription).toBe('aborted');
+      expect(settles).toEqual([expect.objectContaining({ opts: { release: true } })]);
+      expect(mockSpan.endCount).toBe(1);
+    });
+
+    it('asResponse() and then reading the stream traces the stream', async () => {
+      const stream = new FakeStream(CHUNKS);
+      const { traced } = streamWrap(stream);
+      const promise = traced({ model: 'm', messages: MSGS, stream: true });
+      await promise.asResponse();
+      expect(mockSpan.endCount).toBe(0);
+      expect(await readAll(await promise)).toBe('Paris.');
+      expect(mockSpan.attributes['llm.completion']).toBe('Paris.');
+      expect(mockSpan.attributes['llm.usage.total_tokens']).toBe(16);
+      expect(settles).toEqual([expect.objectContaining({ opts: undefined })]);
       expect(mockSpan.endCount).toBe(1);
     });
 
@@ -478,6 +518,7 @@ describe('Groq Instrumentation', () => {
       expect(mockSpan.recordException).toHaveBeenCalledWith(error);
       expect(mockSpan.status).toBe(SpanStatus.ERROR);
       expect(mockSpan.statusDescription).toBe('connection reset');
+      expect(mockSpan.attributes['llm.completion']).toBe('Par');
       expect(settles).toEqual([expect.objectContaining({ opts: { release: true } })]);
       expect(mockSpan.endCount).toBe(1);
     });

@@ -215,13 +215,16 @@ for await (const chunk of stream) {
 }
 ```
 
-- `create()` still returns groq-sdk's promise surface: `.withResponse()` and `.asResponse()` work as before.
-- **Streaming (`stream: true`)**: the span stays open until the stream is read to the end, the loop stops early, the stream is aborted, or it is garbage collected. It then records the full completion and token usage (from `x_groq.usage`, or `usage` with `stream_options: { include_usage: true }`). Iterating, `tee()`, and `toReadableStream()` are all traced. An aborted stream (`stream.controller.abort()`) is marked `aborted` and releases its governance reservation.
+- `create()` still returns groq-sdk's promise surface: `.withResponse()` and `.asResponse()` work as before. Awaiting the data after `.asResponse()` still records the completion and usage; if you only call `.asResponse()` and never read the data, the span ends when the promise is garbage collected.
+- **Streaming (`stream: true`)**: the span stays open while the stream is read. Read to the end, it records the full completion and token usage (from `x_groq.usage`, or `usage` with `stream_options: { include_usage: true }`). A loop that stops early ends the span with the text received so far; Groq reports usage only on the last chunk, so the span gets estimated token counts (marked as estimated) instead of provider-reported ones. An abort or an error mid-stream also keeps the text received so far. `stream.controller.abort()` marks the span `aborted`, ends it, and releases its governance reservation right away. A stream that is never read to the end, closed, or aborted ends when garbage collected. Iterating, `tee()`, and `toReadableStream()` are all traced.
 - Governance settlement runs as the agent that made the call, even if the stream is read later or under another `runIdentity()`.
 - **ES modules**: automatic patching covers the CommonJS build of `groq-sdk`. If your app loads `groq-sdk` with `import` (`"type": "module"`), wrap the client instead:
 
 ```typescript
+import Groq from 'groq-sdk';
 import { wrapGroqChatCompletionsCreate } from '@traccia/sdk';
+
+const client = new Groq();
 
 client.chat.completions.create = wrapGroqChatCompletionsCreate(
   client.chat.completions.create.bind(client.chat.completions),
