@@ -8,7 +8,7 @@
 export { patchOpenAI, wrapOpenAICreate, patchOpenAIResponses, wrapOpenAIResponsesCreate } from './openai';
 export { patchAnthropic, wrapAnthropicCreate } from './anthropic';
 export { patchGemini, wrapGeminiInteractionsCreate } from './gemini';
-export { patchGroq, wrapGroqChatCompletionsCreate } from './groq';
+export { patchGroq, patchGroqEsm, wrapGroqChatCompletionsCreate } from './groq';
 
 // HTTP Client Instrumentation
 export { patchAxios, createTracedAxios } from './axios';

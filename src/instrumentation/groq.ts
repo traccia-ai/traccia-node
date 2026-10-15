@@ -9,21 +9,39 @@
  * - Streaming: the returned `Stream` is groq-sdk's own object. Its iterator is wrapped, so the
  *   span stays open until the stream is read to the end, stopped early, aborted, or garbage
  *   collected, and then records the full completion and token usage.
- * - Finalization (span attributes, governance settlement) runs in the async context of the
- *   `create()` call, so it belongs to the agent and span that made the call, whichever
+ * - Finalization (span attributes, governance settlement, metrics) runs in the async context
+ *   of the `create()` call, so it belongs to the agent and span that made the call, whichever
  *   context consumes the result.
+ * - Settlement charges the Spend Cap what the call cost: its priced token usage, an estimate
+ *   when the response or stream was read but carried no usage, or the full reservation when
+ *   nothing of the response was read. Only a call that failed before any output releases its
+ *   reservation. The settle request runs in the background; stopTracing() waits for it.
  */
 
 import { AsyncResource } from 'async_hooks';
+import { existsSync } from 'fs';
 import { createRequire } from 'module';
 import { join } from 'path';
+import { pathToFileURL } from 'url';
 import { getTracer } from '../auto';
+import { getAgentId, getAgentName, getEnv } from '../config/runtime-config';
 import { runWithSpanAsync } from '../context/context';
-import { enforceLlmCall, finishLlmCall } from '../governance/pep';
+import {
+  enforceLlmCall,
+  estimateTokens,
+  finishLlmCall,
+  reservedUsd,
+  SettleOptions,
+  trackPendingSettle,
+} from '../governance/pep';
+import { getMetricsRecorder } from '../metrics/recorder';
+import { computeCost } from '../processor/cost-processor';
 import { SpanStatus, ISpan } from '../types';
 
 let _patched = false;
+let _esmPatching: Promise<boolean> | undefined;
 
+const VENDOR = 'groq';
 const SPAN_NAME = 'llm.groq.chat.completions';
 const COMPLETIONS_MODULE = 'groq-sdk/resources/chat/completions';
 
@@ -127,8 +145,15 @@ function recordUsage(span: ISpan, usage: unknown): void {
   const u = usage as Record<string, unknown>;
   span.setAttribute('llm.usage.source', 'provider_usage');
   if (u.prompt_tokens != null) {
-    span.setAttribute('llm.usage.prompt_tokens', u.prompt_tokens);
-    span.setAttribute('llm.usage.input_tokens', u.prompt_tokens);
+    // Prompt tokens are the uncached input, as the cost processor and the platform price them;
+    // cached input is priced at its own rate.
+    const cached = cachedTokens(usage, u.prompt_tokens);
+    const uncached = typeof u.prompt_tokens === 'number' ? u.prompt_tokens - cached : u.prompt_tokens;
+    span.setAttribute('llm.usage.prompt_tokens', uncached);
+    span.setAttribute('llm.usage.input_tokens', uncached);
+    if (cached) {
+      span.setAttribute('llm.usage.cache_read_tokens', cached);
+    }
     span.setAttribute('llm.usage.prompt_source', 'provider_usage');
   }
   if (u.completion_tokens != null) {
@@ -150,8 +175,14 @@ function recordCompletion(
   finishReason: unknown,
   respModel: unknown
 ): void {
-  if (respModel && !span.attributes['llm.model']) {
-    span.setAttribute('llm.model', String(respModel));
+  if (typeof respModel === 'string' && respModel) {
+    // The model Groq ran and billed, which settlement prices too, so the span's cost agrees
+    // with the settled cost. A different requested name is kept alongside.
+    const requested = span.attributes['llm.model'];
+    if (requested && requested !== respModel) {
+      span.setAttribute('llm.request.model', requested);
+    }
+    span.setAttribute('llm.model', respModel);
   }
   if (completion) {
     const content = completion.slice(0, 1000);
@@ -160,6 +191,69 @@ function recordCompletion(
   }
   if (finishReason) {
     span.setAttribute('llm.finish_reason', String(finishReason));
+  }
+}
+
+/**
+ * Prompt and completion token counts from a Groq `usage` object, if it has both.
+ */
+/**
+ * Prompt, completion and cached prompt token counts from a Groq usage object, if it has prompt
+ * and completion counts. Cached tokens (`prompt_tokens_details.cached_tokens`, billed at the
+ * cached input rate) are part of the prompt count; 0 when Groq reports none.
+ */
+function readTokens(usage: unknown): { input: number; output: number; cached: number } | undefined {
+  const input = safeGet(usage, 'prompt_tokens');
+  const output = safeGet(usage, 'completion_tokens');
+  if (typeof input !== 'number' || typeof output !== 'number') {
+    return undefined;
+  }
+  return { input, output, cached: cachedTokens(usage, input) };
+}
+
+/** Cached prompt tokens in a Groq usage object, at most the prompt count; 0 when none. */
+function cachedTokens(usage: unknown, prompt: unknown): number {
+  const cached = safeGet(usage, 'prompt_tokens_details.cached_tokens');
+  if (typeof cached !== 'number' || !Number.isFinite(cached) || cached <= 0) {
+    return 0;
+  }
+  return typeof prompt === 'number' ? Math.min(cached, Math.max(prompt, 0)) : 0;
+}
+
+/**
+ * Characters of output in a message or delta: its content plus any tool call arguments.
+ */
+function outputChars(message: unknown): number {
+  const content = safeGet(message, 'content');
+  let chars = typeof content === 'string' ? content.length : 0;
+  const toolCalls = safeGet(message, 'tool_calls');
+  if (Array.isArray(toolCalls)) {
+    for (const call of toolCalls) {
+      const args = safeGet(call, 'function.arguments');
+      chars += typeof args === 'string' ? args.length : 0;
+    }
+  }
+  return chars;
+}
+
+/**
+ * USD cost of the tokens at Groq's price in the SDK's pricing table, or undefined when the
+ * table has no Groq entry for the model (the server then prices the tokens). Only Groq's own
+ * entries are used (see STRICT_VENDORS). `cached` tokens are part of `input`.
+ */
+function priceTokens(
+  model: string | undefined,
+  input: number,
+  output: number,
+  cached = 0
+): number | undefined {
+  if (!model) {
+    return undefined;
+  }
+  try {
+    return computeCost(model, input - cached, output, VENDOR, cached);
+  } catch {
+    return undefined;
   }
 }
 
@@ -198,21 +292,35 @@ class CallState {
   /** Async context of the create() call: run identity, PEP flag, and this span as current. */
   public scope: AsyncResource | undefined;
   public decision: Record<string, unknown> | undefined;
+  /** The model sent to Groq, after any reshape by the policy check. */
+  public requestModel: string | undefined;
   /** next()/return() calls in progress. groq-sdk's own aborts happen inside them. */
   public iterating = 0;
   private done = false;
   private detachAbort: (() => void) | undefined;
   private readonly parts: string[] = [];
+  /** Output characters streamed so far (content and tool call arguments). */
+  private streamedChars = 0;
+  /** Stream chunks read so far. */
+  private chunks = 0;
   private respModel: unknown;
   private usage: unknown;
   private finishReason: unknown;
+  private readonly startedAt = Date.now();
 
-  public constructor(private readonly span: ISpan) {}
+  /**
+   * @param promptTokens - Estimated prompt size, used when Groq reports no usage
+   */
+  public constructor(
+    private readonly span: ISpan,
+    private readonly promptTokens: number | undefined
+  ) {}
 
   /**
    * Collect content, finish reason and usage from one ChatCompletionChunk.
    */
   public onChunk(chunk: unknown): void {
+    this.chunks++;
     try {
       this.respModel = this.respModel || safeGet(chunk, 'model');
       // Groq puts usage on the last chunk under x_groq.usage; chunk.usage is set instead
@@ -226,6 +334,7 @@ class CallState {
       if (typeof content === 'string' && content) {
         this.parts.push(content);
       }
+      this.streamedChars += outputChars(safeGet(choice, 'delta'));
       const finishReason = safeGet(choice, 'finish_reason');
       if (finishReason) {
         this.finishReason = finishReason;
@@ -274,42 +383,55 @@ class CallState {
   }
 
   /**
-   * Record the outcome, settle the governance reservation, and end the span. Runs in the
-   * create() call's async context; only the first call does anything. Never rejects.
+   * Record the outcome, settle the governance reservation, record metrics, and end the span.
+   * Runs in the create() call's async context; only the first call does anything. Finishes
+   * synchronously (the settle continues in the background) and never rejects.
    */
-  public async finalize(outcome: Outcome): Promise<void> {
+  public finalize(outcome: Outcome): Promise<void> {
     if (this.done) {
-      return;
+      return Promise.resolve();
     }
     this.done = true;
     abandoned?.unregister(this);
     this.detachAbort?.();
-    const run = async (): Promise<void> => {
+    const run = (): void => {
       try {
-        if (outcome.kind === 'success') {
-          if (outcome.response !== undefined) {
-            recordUsage(this.span, safeGet(outcome.response, 'usage'));
-            const choice = firstChoice(outcome.response);
-            const content = safeGet(choice, 'message.content');
-            recordCompletion(
-              this.span,
-              typeof content === 'string' ? content : undefined,
-              safeGet(choice, 'finish_reason'),
-              safeGet(outcome.response, 'model')
-            );
-          } else {
-            recordUsage(this.span, this.usage);
-            recordCompletion(
-              this.span,
-              this.parts.join('') || undefined,
-              this.finishReason,
-              this.respModel
-            );
-          }
-          await finishLlmCall(this.decision).catch(() => undefined);
+        let usage: unknown;
+        let respModel: unknown;
+        let chars: number;
+        // Whether any of the response reached the caller, so Groq produced output.
+        let read: boolean;
+        if (outcome.kind === 'success' && outcome.response !== undefined) {
+          read = true;
+          const response = outcome.response;
+          const choice = firstChoice(response);
+          const content = safeGet(choice, 'message.content');
+          usage = safeGet(response, 'usage');
+          respModel = safeGet(response, 'model');
+          chars = outputChars(safeGet(choice, 'message'));
+          recordUsage(this.span, usage);
+          recordCompletion(
+            this.span,
+            typeof content === 'string' ? content : undefined,
+            safeGet(choice, 'finish_reason'),
+            respModel
+          );
         } else {
-          // Keep the text that arrived before the abort or error, as a stopped loop does.
-          recordCompletion(this.span, this.parts.join('') || undefined, undefined, this.respModel);
+          // A stream, or a call that ended before its data was read. After an abort or error
+          // this keeps the text and any usage that arrived, as a stopped loop does.
+          usage = this.usage;
+          respModel = this.respModel;
+          chars = this.streamedChars;
+          read = this.chunks > 0;
+          recordUsage(this.span, usage);
+          recordCompletion(
+            this.span,
+            this.parts.join('') || undefined,
+            outcome.kind === 'success' ? this.finishReason : undefined,
+            respModel
+          );
+        }
+        if (outcome.kind !== 'success') {
           if (outcome.kind === 'error' && outcome.error instanceof Error) {
             this.span.recordException(outcome.error);
           }
@@ -320,15 +442,117 @@ class CallState {
               : outcome.error instanceof Error
                 ? outcome.error.message || outcome.error.name
                 : String(outcome.error);
-          await finishLlmCall(this.decision, { release: true }).catch(() => undefined);
         }
+        const model =
+          (typeof respModel === 'string' && respModel) || this.requestModel || undefined;
+        const tokens = readTokens(usage);
+        const settle = this.settlement(outcome, tokens, model, chars, read);
+        this.recordMetrics(outcome, tokens, model, tokens ? settle.actualUsd : undefined);
+        // In the background, so a slow policy server does not delay the caller's data. It
+        // starts here, in the call's context, so it settles for the agent that made the call.
+        trackPendingSettle(finishLlmCall(this.decision, settle).catch(() => undefined));
       } catch {
         // Recording is best-effort; the span still ends below.
       } finally {
         this.span.end();
       }
     };
-    await (this.scope ? this.scope.runInAsyncScope(run) : run());
+    if (this.scope) {
+      this.scope.runInAsyncScope(run);
+    } else {
+      run();
+    }
+    return Promise.resolve();
+  }
+
+  /**
+   * What to settle the reservation with. Groq bills the tokens it generated, also for a
+   * stream that was stopped, aborted or failed partway.
+   *
+   * @param read - Whether any of the response reached the caller
+   */
+  private settlement(
+    outcome: Outcome,
+    tokens: { input: number; output: number; cached: number } | undefined,
+    model: string | undefined,
+    chars: number,
+    read: boolean
+  ): SettleOptions {
+    if (tokens) {
+      return {
+        actualUsd: priceTokens(model, tokens.input, tokens.output, tokens.cached),
+        model,
+        vendor: VENDOR,
+        inputTokens: tokens.input,
+        outputTokens: tokens.output,
+      };
+    }
+    if (read || chars > 0) {
+      // The response was read but carried no usage (or the stream stopped before it): estimate
+      // the output from the text, at least one token, and the prompt from the request. The
+      // server prices the estimate, and only does so when both counts are present.
+      return {
+        model,
+        vendor: VENDOR,
+        inputTokens: this.promptTokens ?? 0,
+        outputTokens: Math.max(Math.ceil(chars / 4), 1),
+      };
+    }
+    if (outcome.kind === 'success') {
+      // The call completed but nothing of the response was read, so its cost is unknown:
+      // charge the full reservation rather than nothing.
+      return { actualUsd: reservedUsd(this.decision) };
+    }
+    return { release: true };
+  }
+
+  /**
+   * Record token, duration, cost and exception metrics, as the Python OpenAI integration does.
+   * Tokens and cost are recorded only when Groq reported usage, never from estimates.
+   */
+  private recordMetrics(
+    outcome: Outcome,
+    tokens: { input: number; output: number } | undefined,
+    model: string | undefined,
+    cost: number | undefined
+  ): void {
+    try {
+      const recorder = getMetricsRecorder();
+      if (!recorder) {
+        return;
+      }
+      // The run's agent identity, so the data point is attributed to the agent that made
+      // the call rather than to the service.
+      const attributes: Record<string, string> = { 'gen_ai.system': VENDOR };
+      if (model) {
+        attributes['gen_ai.request.model'] = model;
+      }
+      const agentId = getAgentId();
+      const agentName = getAgentName();
+      const env = getEnv();
+      if (agentId) {
+        attributes['agent.id'] = agentId;
+        attributes['agent_id'] = agentId;
+      }
+      if (agentName) {
+        attributes['agent.name'] = agentName;
+      }
+      if (env) {
+        attributes['environment'] = env;
+      }
+      if (tokens) {
+        recorder.recordTokenUsage(tokens.input, tokens.output, attributes);
+      }
+      recorder.recordDuration((Date.now() - this.startedAt) / 1000, attributes);
+      if (cost != null) {
+        recorder.recordCost(cost, attributes);
+      }
+      if (outcome.kind === 'error') {
+        recorder.recordException(attributes);
+      }
+    } catch {
+      // Metrics are best-effort.
+    }
   }
 }
 
@@ -428,10 +652,40 @@ class GroqCall {
         }
         return api.asResponse();
       })
-      .catch(async (error: unknown) => {
-        await this.state.finalize({ kind: 'error', error });
-        throw error;
-      });
+      .then(
+        (response) => {
+          if (!this.streaming) {
+            void this.recordRawResponse(response);
+          }
+          return response;
+        },
+        async (error: unknown) => {
+          await this.state.finalize({ kind: 'error', error });
+          throw error;
+        }
+      );
+  }
+
+  /**
+   * Record a non-streaming call from its raw `Response`, read through a clone so the caller's
+   * body stays unread. A caller who reads the raw body and never awaits the data is then
+   * charged the call's usage, not its full reservation. Streams are left to the caller: reading
+   * a clone to the end would keep the request open after the caller cancels it.
+   */
+  private async recordRawResponse(response: unknown): Promise<void> {
+    const raw = response as { clone?: () => { json?: () => Promise<unknown> } | null } | null;
+    if (typeof raw?.clone !== 'function') {
+      return;
+    }
+    try {
+      const copy = raw.clone();
+      if (typeof copy?.json !== 'function') {
+        return;
+      }
+      await this.state.finalize({ kind: 'success', response: await copy.json() });
+    } catch {
+      // Unreadable: the data, if awaited, or garbage collection settles the call instead.
+    }
   }
 }
 
@@ -452,6 +706,10 @@ class TracedApiPromise<T> extends Promise<T> {
       // A no-op, as in groq-sdk's APIPromise: the result comes from parse().
       resolve(null as T);
     });
+    // groq-sdk sends the request whether or not the promise is awaited. If it never is (or
+    // only asResponse() is used), the span ends and the call settles when this promise is
+    // garbage collected. parse() unregisters it.
+    abandoned?.register(this, call.state, call);
   }
 
   private parse(): Promise<T> {
@@ -481,11 +739,6 @@ class TracedApiPromise<T> extends Promise<T> {
 
   /** The raw `Response`, with the body unread. */
   public asResponse(): Promise<unknown> {
-    if (this.parsedPromise === undefined) {
-      // The caller may still await the data. If it never does, the span ends when this
-      // promise is garbage collected.
-      abandoned?.register(this, this.call.state, this.call);
-    }
     return this.call.asResponse();
   }
 
@@ -512,13 +765,19 @@ export function wrapGroqChatCompletionsCreate<F extends (...args: never[]) => un
     return createFn;
   }
   const wrapped = function wrappedCreate(this: unknown, ...args: unknown[]): unknown {
-    const kwargs = (args[0] || {}) as Record<string, unknown>;
+    // A shallow copy of the request: a reshape by the policy check changes the copy that is
+    // sent, never the caller's own object, which they may reuse for later calls.
+    const body = args[0];
+    const kwargs = (
+      body && typeof body === 'object' ? { ...(body as Record<string, unknown>) } : {}
+    ) as Record<string, unknown>;
+    const callArgs = body && typeof body === 'object' ? [kwargs, ...args.slice(1)] : args;
     const messages = extractMessages(kwargs);
     const promptText = extractPromptText(messages);
 
     const span = getTracer('groq').startSpan(SPAN_NAME);
     const attributes: Record<string, unknown> = {
-      'llm.vendor': 'groq',
+      'llm.vendor': VENDOR,
       'span.type': 'LLM',
     };
     if (typeof kwargs.model === 'string') {
@@ -539,18 +798,19 @@ export function wrapGroqChatCompletionsCreate<F extends (...args: never[]) => un
       span.setAttribute(key, value);
     }
 
-    const state = new CallState(span);
+    const state = new CallState(span, estimateTokens(kwargs));
     const call = new GroqCall(state, kwargs.stream === true);
     const thisArg = instance || this;
     call.started = runWithSpanAsync(span, async () => {
       // Created while this span is current, inside the caller's run identity.
       state.scope = new AsyncResource('traccia.groq.chat.completions');
-      state.decision = await enforceLlmCall(kwargs);
+      state.decision = await enforceLlmCall(kwargs, VENDOR);
       if (typeof kwargs.model === 'string') {
+        state.requestModel = kwargs.model;
         span.setAttribute('llm.model', kwargs.model);
       }
       // Wrapped in an object so the APIPromise is not awaited (and parsed) here.
-      return { api: original.apply(thisArg, args) as GroqApiPromise };
+      return { api: original.apply(thisArg, callArgs) as GroqApiPromise };
     });
     // The caller observes failures through the returned promise.
     call.started.catch(() => undefined);
@@ -561,6 +821,16 @@ export function wrapGroqChatCompletionsCreate<F extends (...args: never[]) => un
 }
 
 type CompletionsClass = { prototype?: { create?: PatchedFn } };
+
+/** Imports a module by URL, as a dynamic `import()` does. */
+export type ImportModule = (url: string) => Promise<unknown>;
+
+/**
+ * A real dynamic `import()`. Built with Function so that neither tsc (`module: commonjs`) nor
+ * the CommonJS bundle rewrites it into `require()`, which would load the CommonJS build again.
+ */
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const importModule = new Function('url', 'return import(url)') as ImportModule;
 
 function loadCompletions(load: (id: string) => unknown): CompletionsClass | null {
   const mod = load(COMPLETIONS_MODULE) as { Completions?: CompletionsClass } | null | undefined;
@@ -583,30 +853,102 @@ function requireGroqCompletions(): CompletionsClass | null {
 }
 
 /**
- * Patch Groq (groq-sdk) chat completions for tracing.
+ * Wrap `create` on one build's Completions class. False if the class has no `create`.
+ */
+function patchCompletions(Completions: CompletionsClass | null | undefined): boolean {
+  const proto = Completions?.prototype;
+  if (!proto || typeof proto.create !== 'function') {
+    return false;
+  }
+  if (!proto.create._agentTracePatched) {
+    proto.create = wrapGroqChatCompletionsCreate(proto.create, null);
+  }
+  return true;
+}
+
+/**
+ * Files of groq-sdk's ES module build of the Completions resource, from this package's
+ * resolution and from the app's. groq-sdk ships each one beside its CommonJS file, as `.mjs`.
+ */
+function esmCompletionsPaths(): string[] {
+  const resolvers: Array<() => string> = [
+    (): string => require.resolve(COMPLETIONS_MODULE),
+    (): string => createRequire(join(process.cwd(), 'package.json')).resolve(COMPLETIONS_MODULE),
+  ];
+  const paths = new Set<string>();
+  for (const resolve of resolvers) {
+    try {
+      const esm = resolve().replace(/\.c?js$/, '.mjs');
+      if (existsSync(esm)) {
+        paths.add(esm);
+      }
+    } catch {
+      // Not resolvable from here.
+    }
+  }
+  return Array.from(paths);
+}
+
+/**
+ * Patch Groq (groq-sdk) chat completions for tracing, in groq-sdk's CommonJS build: the one
+ * `require('groq-sdk')` and CommonJS TypeScript output load. Also starts patchGroqEsm() for
+ * apps that `import` groq-sdk; `init()` waits for it.
  *
- * Soft-fails (returns false) if groq-sdk isn't installed. Patches the CommonJS build of
- * groq-sdk, which is what `require('groq-sdk')` and CommonJS TypeScript output load.
+ * Soft-fails (returns false) if groq-sdk isn't installed.
  *
- * @returns true if patched successfully, false otherwise
+ * @returns true if the CommonJS build was patched, false otherwise
  */
 export function patchGroq(): boolean {
+  void patchGroqEsm();
   if (_patched) {
     return true;
   }
 
   try {
-    const Completions = requireGroqCompletions();
-    const proto = Completions?.prototype;
-    if (!proto || typeof proto.create !== 'function') {
+    if (!patchCompletions(requireGroqCompletions())) {
       return false;
-    }
-    if (!proto.create._agentTracePatched) {
-      proto.create = wrapGroqChatCompletionsCreate(proto.create, null);
     }
     _patched = true;
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Patch groq-sdk's ES module build, which `import Groq from 'groq-sdk'` loads. It has its own
+ * Completions class, separate from the CommonJS build's, and loads only asynchronously. Calls
+ * made before the returned promise resolves are not traced.
+ *
+ * Soft-fails (resolves false) if groq-sdk or its ES module build isn't installed. A failed
+ * attempt is retried on the next call.
+ *
+ * @param load - Imports a module by file URL; defaults to dynamic `import()`
+ * @returns true if an ES module build was patched, false otherwise
+ */
+export function patchGroqEsm(load: ImportModule = importModule): Promise<boolean> {
+  if (_esmPatching === undefined) {
+    const attempt = (async (): Promise<boolean> => {
+      let patched = false;
+      for (const path of esmCompletionsPaths()) {
+        try {
+          const mod = (await load(pathToFileURL(path).href)) as
+            | { Completions?: CompletionsClass }
+            | null
+            | undefined;
+          patched = patchCompletions(mod?.Completions) || patched;
+        } catch {
+          // This build cannot be loaded here; try the next one.
+        }
+      }
+      return patched;
+    })();
+    _esmPatching = attempt.then((patched) => {
+      if (!patched) {
+        _esmPatching = undefined;
+      }
+      return patched;
+    });
+  }
+  return _esmPatching;
 }

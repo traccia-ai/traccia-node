@@ -184,6 +184,7 @@ export {
   patchGemini,
   wrapGeminiInteractionsCreate,
   patchGroq,
+  patchGroqEsm,
   wrapGroqChatCompletionsCreate,
   patchAxios,
   createTracedAxios,
