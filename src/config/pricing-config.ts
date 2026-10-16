@@ -17,6 +17,9 @@ export interface PricingRates {
   completion?: number;
   cached_prompt?: number;
   cache_write?: number;
+  /** Provider the entry belongs to, when the snapshot records it (e.g. "groq"). */
+  _provider?: string;
+  provider?: string;
 }
 
 export interface PricingTable {

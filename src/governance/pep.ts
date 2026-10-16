@@ -300,9 +300,31 @@ export async function checkPolicy(input: {
   }
 }
 
+/**
+ * How a governed call ended, for settling its reservation. When `actualUsd` is missing, the
+ * server prices the call from `model`, `vendor` and the token counts; with none of them it
+ * releases the reservation.
+ */
+export interface SettleOptions {
+  release?: boolean;
+  actualUsd?: number;
+  model?: string;
+  vendor?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * The USD amount the policy check reserved for a call, if any.
+ */
+export function reservedUsd(decision: Record<string, unknown> | undefined): number | undefined {
+  const reserved = (decision?.obligations as Record<string, unknown> | undefined)?.reserved_usd;
+  return typeof reserved === 'number' ? reserved : undefined;
+}
+
 export async function settlePolicy(
   decision: Record<string, unknown> | undefined,
-  opts: { release?: boolean; actualUsd?: number } = {},
+  opts: SettleOptions = {},
 ): Promise<void> {
   const reserved = (decision?.obligations as Record<string, unknown> | undefined)?.reserved_usd;
   if (reserved == null) {
@@ -326,6 +348,10 @@ export async function settlePolicy(
         reserved_usd: reserved,
         actual_usd: opts.actualUsd,
         release: Boolean(opts.release),
+        model: opts.model,
+        vendor: opts.vendor,
+        input_tokens: opts.inputTokens,
+        output_tokens: opts.outputTokens,
       },
       { headers: { Authorization: `Bearer ${apiKey}` } },
     );
@@ -334,23 +360,86 @@ export async function settlePolicy(
   }
 }
 
-function estimateTokens(kwargs: Record<string, unknown>): number | undefined {
-  const messages = kwargs.messages as Array<{ content?: unknown }> | undefined;
-  let blob = '';
-  if (Array.isArray(messages)) {
-    blob = messages.map((item) => String(item?.content || '')).join('\n');
-  } else if (typeof kwargs.prompt === 'string') {
-    blob = kwargs.prompt;
-  } else if (typeof kwargs.input === 'string') {
-    blob = kwargs.input;
+/**
+ * Characters one image is counted as in a prompt estimate: 1,000 tokens, in the range vision
+ * models charge for a typical image.
+ */
+export const IMAGE_PROMPT_CHARS = 4000;
+
+const IMAGE_PART_TYPES = new Set(['image_url', 'image', 'input_image']);
+
+/**
+ * Characters of prompt in one message's content: a string, or an array of content parts
+ * (text parts by their text, image parts at IMAGE_PROMPT_CHARS each).
+ */
+function contentChars(content: unknown): number {
+  if (typeof content === 'string') {
+    return content.length;
   }
-  if (!blob) {
-    return undefined;
+  if (!Array.isArray(content)) {
+    return 0;
   }
-  return Math.max(Math.floor(blob.length / 4), 1);
+  let chars = 0;
+  for (const part of content) {
+    if (typeof part === 'string') {
+      chars += part.length;
+      continue;
+    }
+    const p = (part ?? {}) as Record<string, unknown>;
+    if (typeof p.text === 'string') {
+      chars += p.text.length;
+    } else if (typeof p.type === 'string' && IMAGE_PART_TYPES.has(p.type)) {
+      chars += IMAGE_PROMPT_CHARS;
+    }
+  }
+  return chars;
 }
 
-export async function enforceLlmCall(kwargs: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+/**
+ * Characters of tool call arguments in an assistant message, which are part of the prompt
+ * when the conversation is sent back.
+ */
+function toolCallChars(message: Record<string, unknown>): number {
+  const calls = message.tool_calls;
+  if (!Array.isArray(calls)) {
+    return 0;
+  }
+  let chars = 0;
+  for (const call of calls) {
+    const args = ((call ?? {}) as { function?: { arguments?: unknown } }).function?.arguments;
+    chars += typeof args === 'string' ? args.length : 0;
+  }
+  return chars;
+}
+
+/**
+ * Rough prompt size in tokens (characters / 4), as sent with the policy check.
+ */
+export function estimateTokens(kwargs: Record<string, unknown>): number | undefined {
+  const messages = kwargs.messages;
+  let chars = 0;
+  if (Array.isArray(messages)) {
+    for (const item of messages) {
+      const message = (item ?? {}) as Record<string, unknown>;
+      chars += contentChars(message.content) + toolCallChars(message);
+    }
+    // One separator per message boundary, as when the messages were joined with newlines.
+    chars += Math.max(messages.length - 1, 0);
+  } else if (typeof kwargs.prompt === 'string') {
+    chars = kwargs.prompt.length;
+  } else if (typeof kwargs.input === 'string') {
+    chars = kwargs.input.length;
+  }
+  if (!chars) {
+    return undefined;
+  }
+  return Math.max(Math.floor(chars / 4), 1);
+}
+
+export async function enforceLlmCall(
+  kwargs: Record<string, unknown>,
+  opts: { vendor?: string } = {},
+): Promise<Record<string, unknown> | undefined> {
   if (!pepEnabled()) {
     return undefined;
   }
@@ -363,6 +452,10 @@ export async function enforceLlmCall(kwargs: Record<string, unknown>): Promise<R
     input_tokens: estimateTokens(kwargs),
     retrieval: retrievalContext(traceId),
   };
+  if (opts.vendor) {
+    // Picks that provider's price when the model name alone is ambiguous.
+    context.vendor = opts.vendor;
+  }
   const prompt = promptContext();
   if (Object.keys(prompt).length) {
     context.prompt = prompt;
@@ -386,9 +479,27 @@ export async function enforceLlmCall(kwargs: Record<string, unknown>): Promise<R
 
 export async function finishLlmCall(
   decision: Record<string, unknown> | undefined,
-  opts: { release?: boolean; actualUsd?: number } = {},
+  opts: SettleOptions = {},
 ): Promise<void> {
   await settlePolicy(decision, opts);
+}
+
+const pendingSettles = new Set<Promise<unknown>>();
+
+/**
+ * Keep track of a settle running in the background, so flushPendingSettles() can wait for
+ * it before tracing stops. The promise must not reject.
+ */
+export function trackPendingSettle(settle: Promise<unknown>): void {
+  pendingSettles.add(settle);
+  void settle.finally(() => pendingSettles.delete(settle));
+}
+
+/**
+ * Wait for every background settle started so far. stopTracing() calls this.
+ */
+export async function flushPendingSettles(): Promise<void> {
+  await Promise.all(Array.from(pendingSettles));
 }
 
 export async function enforceToolCall(

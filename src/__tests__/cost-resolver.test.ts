@@ -1,3 +1,4 @@
+import { PricingRates } from '../config/pricing-config';
 import { getResolver, CostResolver, setResolver } from '../processor/cost-resolver';
 
 describe('CostResolver', () => {
@@ -102,5 +103,102 @@ describe('CostResolver', () => {
     });
     expect(resolver.matchPricingModelKey('gpt-4o-2024-08-06')).toBe('gpt-4o');
     expect(resolver.compute('gpt-4o-2024-08-06', 1000, 500)).toBeDefined();
+  });
+
+  describe('Groq models (LiteLLM-shaped keys)', () => {
+    // Platform snapshot entries: per-1K `prompt`/`completion` rates and a provider.
+    const rates = (prompt: number, completion: number, provider: string) =>
+      ({ prompt, completion, _provider: provider }) as unknown as PricingRates;
+
+    beforeEach(() => {
+      resolver.update({
+        'groq/llama-3.3-70b-versatile': rates(0.00059, 0.00079, 'groq'),
+        'groq/llama-3.1-8b-instant': rates(0.00005, 0.00008, 'groq'),
+        'groq/openai/gpt-oss-120b': rates(0.00015, 0.0006, 'groq'),
+        'groq/meta-llama/llama-4-scout-17b-16e-instruct': rates(0.00011, 0.00034, 'groq'),
+        'together_ai/meta-llama/llama-4-scout-17b-16e-instruct': rates(0.00018, 0.00059, 'together_ai'),
+        'fireworks_ai/accounts/fireworks/models/gemma2-9b-it': rates(0.0002, 0.0002, 'fireworks_ai'),
+        'anthropic.claude-3-5-sonnet-20240620-v1:0': { inputCost: 0.003, outputCost: 0.015 },
+      });
+    });
+
+    it('treats a dot in the model version as part of the name, not a provider prefix', () => {
+      expect(resolver.matchPricingModelKey('llama-3.3-70b-versatile')).toBe('groq/llama-3.3-70b-versatile');
+      expect(resolver.matchPricingModelKey('llama-3.1-8b-instant')).toBe('groq/llama-3.1-8b-instant');
+      expect(resolver.compute('llama-3.3-70b-versatile', 1000, 1000)).toBeCloseTo(0.00138);
+    });
+
+    it('still strips a dotted provider prefix', () => {
+      expect(resolver.matchPricingModelKey('claude-3-5-sonnet-20240620-v1:0')).toBe(
+        'anthropic.claude-3-5-sonnet-20240620-v1:0'
+      );
+    });
+
+    it("with a vendor, uses that vendor's price for a slash-containing model id", () => {
+      expect(resolver.matchPricingModelKey('openai/gpt-oss-120b', 'groq')).toBe('groq/openai/gpt-oss-120b');
+      expect(resolver.compute('openai/gpt-oss-120b', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(0.00075);
+      expect(resolver.matchPricingModelKey('meta-llama/llama-4-scout-17b-16e-instruct', 'groq')).toBe(
+        'groq/meta-llama/llama-4-scout-17b-16e-instruct'
+      );
+    });
+
+    it("with a vendor, never uses another provider's price", () => {
+      expect(resolver.matchPricingModelKey('gemma2-9b-it')).toBe(
+        'fireworks_ai/accounts/fireworks/models/gemma2-9b-it'
+      );
+      expect(resolver.matchPricingModelKey('gemma2-9b-it', 'groq')).toBeUndefined();
+      expect(resolver.compute('gemma2-9b-it', 1000, 1000, 0, 0, 'groq')).toBeUndefined();
+      expect(resolver.compute('anthropic.claude-3-5-sonnet-20240620-v1:0', 1000, 1000, 0, 0, 'groq')).toBeUndefined();
+    });
+
+    it('with a vendor, matches entries by their provider field', () => {
+      resolver.update({ 'kimi-k2': rates(0.001, 0.003, 'groq') });
+      expect(resolver.matchPricingModelKey('kimi-k2', 'groq')).toBe('kimi-k2');
+    });
+
+    it('with a vendor, needs the same base name, never a name prefix', () => {
+      resolver.update({
+        'kimi-k2': rates(0.001, 0.003, 'groq'),
+        'groq/openai/gpt-oss-120b': rates(0.00015, 0.0006, 'groq'),
+        'groq/openai/gpt-oss-120b-2025-08-05': rates(0.0001, 0.0005, 'groq'),
+        'groq/llama-3.3-70b-versatile': rates(0.00059, 0.00079, 'groq'),
+      });
+      // A date suffix is not part of the base name; the exact dated key wins over the undated one.
+      expect(resolver.matchPricingModelKey('openai/gpt-oss-120b-20250101', 'groq')).toBe('groq/openai/gpt-oss-120b');
+      expect(resolver.matchPricingModelKey('openai/gpt-oss-120b-2025-08-05', 'groq')).toBe(
+        'groq/openai/gpt-oss-120b-2025-08-05'
+      );
+      expect(resolver.matchPricingModelKey('kimi-k2-instruct-0905', 'groq')).toBeUndefined();
+      expect(resolver.matchPricingModelKey('llama-3.3-70b-versatile-0915', 'groq')).toBeUndefined();
+      expect(resolver.matchPricingModelKey('llama-3.3-70b', 'groq')).toBeUndefined();
+    });
+
+    it('prices a Groq model at the Groq key even when another provider has a shorter one', () => {
+      resolver.update({
+        'ovhcloud/Qwen3-32B': rates(0.00008, 0.00023, 'ovhcloud'),
+        'groq/qwen/qwen3-32b': rates(0.00029, 0.00059, 'groq'),
+      });
+      expect(resolver.compute('qwen/qwen3-32b', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(0.00088);
+    });
+
+    it('ignores a vendor that is not strict', () => {
+      resolver.update({ 'kimi-k2': rates(0.001, 0.003, 'groq') });
+      expect(resolver.matchPricingModelKey('kimi-k2', 'openai')).toBe('kimi-k2');
+    });
+
+    it('prices cached input at the cached rate, or the input rate without one', () => {
+      resolver.update({
+        'groq/openai/gpt-oss-120b': {
+          ...rates(0.00015, 0.0006, 'groq'),
+          cached_prompt: 0.000075,
+        } as unknown as PricingRates,
+        'groq/qwen/qwen3-32b': rates(0.00029, 0.00059, 'groq'),
+      });
+      expect(resolver.compute('openai/gpt-oss-120b', 200, 0, 800, 0, 'groq')).toBeCloseTo(0.00003 + 0.00006);
+      expect(resolver.computeDetailed('qwen/qwen3-32b', 200, 0, 800, 0, 'groq')).toEqual({
+        cost: expect.closeTo(0.00029),
+        cacheFallback: true,
+      });
+    });
   });
 });

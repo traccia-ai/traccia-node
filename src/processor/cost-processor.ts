@@ -26,14 +26,17 @@ export function setCachedPricing(pricing: PricingTable): void {
 }
 
 /**
- * Compute cost for a given model and token counts.
+ * Compute cost for a given model and token counts. A vendor in STRICT_VENDORS is priced only
+ * from its own entries. promptTokens is uncached input; cacheReadTokens use the cached rate.
  */
 export function computeCost(
   model: string,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  vendor?: string,
+  cacheReadTokens = 0
 ): number | undefined {
-  return getResolver().compute(model, promptTokens, completionTokens);
+  return getResolver().compute(model, promptTokens, completionTokens, cacheReadTokens, 0, vendor);
 }
 
 function checkAndLogStaleness(generatedAt: string, ageDays: number | undefined): void {
@@ -131,8 +134,16 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
         return;
       }
 
+      const vendor = typeof attrs['llm.vendor'] === 'string' ? (attrs['llm.vendor'] as string) : undefined;
       const resolver = getResolver();
-      const detailed = resolver.computeDetailed(model, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens);
+      const detailed = resolver.computeDetailed(
+        model,
+        promptTokens,
+        completionTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        vendor
+      );
       if (detailed == null) {
         return;
       }
@@ -154,7 +165,7 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
       span.setAttribute('llm.cost.source', usageSource);
       span.setAttribute('llm.pricing.source', this.pricingSource);
 
-      const modelKey = resolver.matchPricingModelKey(model);
+      const modelKey = resolver.matchPricingModelKey(model, vendor);
       if (modelKey) {
         span.setAttribute('llm.pricing.model_key', modelKey);
       }
