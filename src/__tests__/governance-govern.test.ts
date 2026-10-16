@@ -133,7 +133,7 @@ describe('govern', () => {
 
             expect(mockCheckAgentStatus).toHaveBeenCalledWith('from-init', { failOpen: false });
             expect(mockRunIdentity).toHaveBeenCalledWith(
-                { pepEnabled: true },
+                { pepEnabled: true, pepFailOpen: false },
                 expect.any(Function),
             );
         });
@@ -200,7 +200,7 @@ describe('govern', () => {
             await wrapped();
 
             expect(mockRunIdentity).toHaveBeenCalledWith(
-                { pepEnabled: true, agentId: 'agent-1', agentName: 'my-agent' },
+                { pepEnabled: true, pepFailOpen: true, agentId: 'agent-1', agentName: 'my-agent' },
                 expect.any(Function),
             );
         });

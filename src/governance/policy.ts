@@ -155,21 +155,27 @@ function recordBlockAsync(
     });
 }
 
+function missingSetting(message: string, failOpen: boolean): void {
+  if (failOpen) {
+    console.warn(`[traccia.governance] ${message} Use observe() for tracing-only setups.`);
+    return;
+  }
+  throw new AgentBlockedError(
+    `${message} Blocking execution because failOpen is false. Set TRACCIA_API_KEY and TRACCIA_ENDPOINT, or pass failOpen: true.`,
+  );
+}
+
 async function fetchAndApplyStatus(agentId: string, failOpen: boolean): Promise<void> {
   const config = loadConfig();
   const apiKey = config.tracing.api_key;
   if (!apiKey) {
-    console.warn(
-      '[traccia.governance] Traccia API key not found. govern() requires a Traccia platform account; use observe() for tracing-only setups.',
-    );
+    missingSetting('Traccia API key not found. govern() requires a Traccia platform account.', failOpen);
     return;
   }
 
   const tracesEndpoint = config.tracing.endpoint;
   if (!tracesEndpoint) {
-    console.warn(
-      '[traccia.governance] Traccia endpoint not found. govern() requires a Traccia platform endpoint; use observe() for tracing-only setups.',
-    );
+    missingSetting('Traccia endpoint not found. govern() requires a Traccia platform endpoint.', failOpen);
     return;
   }
 

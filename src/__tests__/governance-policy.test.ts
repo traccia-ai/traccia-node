@@ -286,4 +286,22 @@ describe('governance policy', () => {
 
     expect(get).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ['API key not found', { endpoint: 'https://api.traccia.ai/v2/traces' }],
+    ['endpoint not found', { api_key: 'test-key' }],
+  ])('blocks when %s and failOpen is false', async (message, tracing) => {
+    const { loadConfig } = jest.requireMock('../config/config') as { loadConfig: jest.Mock };
+    loadConfig.mockReturnValueOnce({ tracing });
+    const client = axios.create();
+    const get = jest.spyOn(client, 'get');
+    _setHttpClientForTests(client);
+
+    const err = await checkAgentStatus('agent-missing', { failOpen: false }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(AgentBlockedError);
+    expect(err.message).toContain(message);
+    expect(err.message).toContain('failOpen is false');
+    expect(get).not.toHaveBeenCalled();
+  });
 });

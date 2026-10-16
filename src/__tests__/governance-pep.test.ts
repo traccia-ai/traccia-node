@@ -393,4 +393,69 @@ describe('AgentBlockedError extras', () => {
     expect(err.remainingBudgetUsd).toBe(0);
     expect(err.reasons).toEqual(['spend exceeded cap']);
   });
+
+  describe('fail-closed runs', () => {
+    const failClosed = { agentId: 'support', pepEnabled: true, pepFailOpen: false };
+
+    it('blocks on a transport error', async () => {
+      const client = axios.create();
+      jest.spyOn(client, 'post').mockRejectedValue(new Error('timeout'));
+      _setPepHttpClientForTests(client);
+
+      await runIdentity(failClosed, async () => {
+        const err = await enforceLlmCall({ model: 'gpt-4o' }).catch((e) => e);
+        expect(err).toBeInstanceOf(AgentBlockedError);
+        expect(err.reasons).toEqual(['check_error']);
+        expect(err.message).toContain('failOpen is false');
+      });
+    });
+
+    it('blocks on an HTTP error response', async () => {
+      const client = axios.create();
+      const httpErr = Object.assign(new Error('Request failed'), {
+        isAxiosError: true,
+        response: { status: 503 },
+      });
+      jest.spyOn(client, 'post').mockRejectedValue(httpErr);
+      _setPepHttpClientForTests(client);
+
+      await runIdentity(failClosed, async () => {
+        const err = await enforceToolCall('issue_refund', { amount: 80 }).catch((e) => e);
+        expect(err).toBeInstanceOf(AgentBlockedError);
+        expect(err.reasons).toEqual(['check_http_error']);
+      });
+    });
+
+    it('blocks when credentials are missing', async () => {
+      const { loadConfig } = jest.requireMock('../config/config') as { loadConfig: jest.Mock };
+      loadConfig.mockReturnValueOnce({ tracing: {} });
+      const saved = { key: process.env.TRACCIA_API_KEY, endpoint: process.env.TRACCIA_ENDPOINT };
+      delete process.env.TRACCIA_API_KEY;
+      delete process.env.TRACCIA_ENDPOINT;
+      try {
+        await runIdentity(failClosed, async () => {
+          const err = await enforceToolCall('search', { q: 'x' }).catch((e) => e);
+          expect(err).toBeInstanceOf(AgentBlockedError);
+          expect(err.reasons).toEqual(['missing_credentials']);
+        });
+      } finally {
+        if (saved.key !== undefined) process.env.TRACCIA_API_KEY = saved.key;
+        if (saved.endpoint !== undefined) process.env.TRACCIA_ENDPOINT = saved.endpoint;
+      }
+    });
+
+    it('still passes a real allow decision', async () => {
+      const client = axios.create();
+      jest.spyOn(client, 'post').mockResolvedValue({
+        status: 200,
+        data: { id: 'dec-ok', effect: 'allow', would_have: false, reasons: [] },
+      });
+      _setPepHttpClientForTests(client);
+
+      await runIdentity(failClosed, async () => {
+        const out = await enforceToolCall('search', { q: 'x' });
+        expect(out?.id).toBe('dec-ok');
+      });
+    });
+  });
 });

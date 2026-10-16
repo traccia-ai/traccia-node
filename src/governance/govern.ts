@@ -42,8 +42,9 @@ function createGovernWrapper(
       );
     }
 
-    const identity: { pepEnabled: true; agentId?: string; agentName?: string } = {
+    const identity: { pepEnabled: true; pepFailOpen: boolean; agentId?: string; agentName?: string } = {
       pepEnabled: true,
+      pepFailOpen: failOpen,
     };
     if (agentId?.trim()) identity.agentId = agentId.trim();
     if (agentName) identity.agentName = agentName;
@@ -69,6 +70,9 @@ function createGovernWrapper(
  *
  * Deny throws AgentBlockedError. Reshape may swap the model on the in-flight
  * request. Observe/Warn in the dashboard still let the call proceed.
+ *
+ * failOpen: false blocks the run, and every checked call inside it, when Traccia
+ * cannot give a decision (missing credentials, HTTP error, timeout).
  *
  * Requires a Traccia account (API key + endpoint). Tracing-only setups should
  * use observe() instead.

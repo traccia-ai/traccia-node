@@ -8,6 +8,7 @@ interface RunIdentity {
   agentId?: string;
   agentName?: string;
   pepEnabled?: boolean;
+  pepFailOpen?: boolean;
 }
 
 interface RuntimeConfig {
@@ -151,8 +152,13 @@ export function pepEnabled(): boolean {
   return Boolean(runIdentityStorage.getStore()?.pepEnabled);
 }
 
+/** False when the current govern() run asked for fail-closed policy checks. */
+export function pepFailOpen(): boolean {
+  return runIdentityStorage.getStore()?.pepFailOpen ?? true;
+}
+
 export function runIdentity<T>(
-  identity: { agentId?: string; agentName?: string; pepEnabled?: boolean },
+  identity: { agentId?: string; agentName?: string; pepEnabled?: boolean; pepFailOpen?: boolean },
   fn: () => T | Promise<T>,
 ): T | Promise<T> {
   const parent = runIdentityStorage.getStore() || {};
@@ -160,5 +166,6 @@ export function runIdentity<T>(
   if (identity.agentId !== undefined) next.agentId = identity.agentId;
   if (identity.agentName !== undefined) next.agentName = identity.agentName;
   if (identity.pepEnabled !== undefined) next.pepEnabled = identity.pepEnabled;
+  if (identity.pepFailOpen !== undefined) next.pepFailOpen = identity.pepFailOpen;
   return runIdentityStorage.run(next, fn);
 }
