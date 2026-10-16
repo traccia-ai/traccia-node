@@ -93,6 +93,21 @@ describe('governance pep', () => {
     });
   });
 
+  it('sends the vendor so Spend Cap prices the right provider', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-v', effect: 'allow', obligations: {} },
+    });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceLlmCall({ model: 'gemini-2.0-flash-001' }, 'google_gemini');
+    });
+    const body = post.mock.calls[0][1] as { context: Record<string, unknown> };
+    expect(body.context.vendor).toBe('google_gemini');
+  });
+
   it('proceeds when would_have is true', async () => {
     const client = axios.create();
     jest.spyOn(client, 'post').mockResolvedValue({

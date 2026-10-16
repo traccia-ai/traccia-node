@@ -132,7 +132,15 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
       }
 
       const resolver = getResolver();
-      const detailed = resolver.computeDetailed(model, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens);
+      const vendor = attrs['llm.vendor'] as string | undefined;
+      const detailed = resolver.computeDetailed(
+        model,
+        promptTokens,
+        completionTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        vendor,
+      );
       if (detailed == null) {
         return;
       }
@@ -154,9 +162,10 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
       span.setAttribute('llm.cost.source', usageSource);
       span.setAttribute('llm.pricing.source', this.pricingSource);
 
-      const modelKey = resolver.matchPricingModelKey(model);
-      if (modelKey) {
-        span.setAttribute('llm.pricing.model_key', modelKey);
+      span.setAttribute('llm.pricing.model_key', detailed.match.key);
+      span.setAttribute('llm.pricing.match_kind', detailed.match.kind);
+      if (detailed.match.provider) {
+        span.setAttribute('llm.pricing.provider', detailed.match.provider);
       }
 
       span.setAttribute('llm.pricing.generated_at', this.pricingGeneratedAt);

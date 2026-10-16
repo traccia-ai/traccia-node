@@ -95,7 +95,7 @@ describe('CostResolver', () => {
     expect(r.getGeneratedAt).toBe('test-time');
   });
 
-  it('matches version-suffixed model names via longest prefix', () => {
+  it('matches dated model names by base name', () => {
     resolver.update({
       'gpt-4o': { inputCost: 0.005, outputCost: 0.015 },
       'gpt-4': { inputCost: 0.03, outputCost: 0.06 },

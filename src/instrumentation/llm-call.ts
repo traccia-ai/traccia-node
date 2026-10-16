@@ -280,7 +280,7 @@ export function tracedProviderCall<S>(
 
     // The request starts eagerly (like the provider APIPromise); parsing is lazy.
     const request = runWithSpanAsync(span, async (): Promise<{ pending: PendingCall }> => {
-        decision = await enforceLlmCall(kwargs);
+        decision = await enforceLlmCall(kwargs, hooks.attributes['llm.vendor'] as string | undefined);
         const scope = new AsyncResource('traccia.llm_call');
         inAuthScope = (fn) => scope.runInAsyncScope(fn);
         // Wrapped in an object: returning the thenable APIPromise directly would await it and parse the body.
