@@ -3,7 +3,7 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
-import { loadConfig } from '../config/config';
+import { resolveClientCredentials } from '../config/client-config';
 import { DEFAULT_ENDPOINT } from '../exporter/http-exporter';
 import { getTracer } from '../auto';
 import { ISpan } from '../types';
@@ -47,9 +47,9 @@ export function resolveCredentials(opts?: {
   endpoint?: string;
   promptApiBase?: string;
 }): { apiKey: string; baseUrl: string } {
-  const cfg = loadConfig();
-  const apiKey = opts?.apiKey || cfg.tracing.api_key || '';
-  const traces = opts?.endpoint || cfg.tracing.endpoint || DEFAULT_ENDPOINT;
+  const resolved = resolveClientCredentials({ apiKey: opts?.apiKey, endpoint: opts?.endpoint });
+  const apiKey = resolved.apiKey || '';
+  const traces = resolved.endpoint || DEFAULT_ENDPOINT;
   if (!apiKey) {
     throw new PromptFetchError(
       'Traccia API key not found. Call init({ apiKey }) or set TRACCIA_API_KEY before loadPrompt.',

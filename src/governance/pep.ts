@@ -3,7 +3,7 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
-import { loadConfig } from '../config/config';
+import { resolveClientCredentials } from '../config/client-config';
 import { getAgentId, pepEnabled } from '../config/runtime-config';
 import { getCurrentSpan } from '../context/context';
 import { AgentBlockedError, ApprovalPending } from './policy';
@@ -230,9 +230,7 @@ export async function checkPolicy(input: {
   context?: Record<string, unknown>;
   resource?: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
-  const config = loadConfig();
-  const apiKey = config.tracing.api_key || process.env.TRACCIA_API_KEY;
-  const endpoint = config.tracing.endpoint || process.env.TRACCIA_ENDPOINT;
+  const { apiKey, endpoint } = resolveClientCredentials();
   if (!apiKey || !endpoint) {
     return { effect: 'allow', would_have: false, reasons: ['missing_credentials'] };
   }
@@ -308,9 +306,7 @@ export async function settlePolicy(
   if (reserved == null) {
     return;
   }
-  const config = loadConfig();
-  const apiKey = config.tracing.api_key || process.env.TRACCIA_API_KEY;
-  const endpoint = config.tracing.endpoint || process.env.TRACCIA_ENDPOINT;
+  const { apiKey, endpoint } = resolveClientCredentials();
   const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID;
   if (!apiKey || !endpoint || !agentId) {
     return;

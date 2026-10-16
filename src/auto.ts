@@ -19,6 +19,7 @@ import { OtlpExporter } from './exporter/otlp-exporter';
 import { ConsoleExporter } from './exporter/console-exporter';
 import { FileExporter } from './exporter/file-exporter';
 import { loadConfig } from './config/config';
+import { setClientConfig, clearClientConfig } from './config/client-config';
 import { loadEnvFile, findAgentConfigPath } from './config/env-config';
 import { loadPricingWithSource } from './config/pricing-config';
 import { resolveServiceName } from './config/service-name';
@@ -118,6 +119,8 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   // overrides from argument 'config' take precedence
   const apiKey = config.apiKey || loadedConfig.tracing.api_key || '';
   const endpoint = config.endpoint || loadedConfig.tracing.endpoint || DEFAULT_ENDPOINT;
+  // Policy, prompts and evals read this instead of re-loading env/file config.
+  setClientConfig(apiKey, endpoint);
   const sampleRate = config.sampleRate ?? loadedConfig.tracing.sample_rate ?? 1.0;
   const useOtlp = config.useOtlp ?? loadedConfig.tracing.use_otlp ?? true;
 
@@ -322,6 +325,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
  * Stop tracing and shutdown all processors.
  */
 export async function stopTracing(): Promise<void> {
+  clearClientConfig();
   if (!globalProvider) {
     return;
   }
