@@ -4,7 +4,8 @@
 
 import { TracerProvider } from './tracer/provider';
 import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
-import { trace } from '@opentelemetry/api';
+import { trace, context as otelContext } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from './context/context';
 import { BatchSpanProcessor } from './processor/batch-processor';
 import { Sampler } from './processor/sampler';
 import { TokenCountingProcessor } from './processor/token-counter';
@@ -104,6 +105,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   const basicProvider = new BasicTracerProvider();
   trace.setGlobalTracerProvider(basicProvider);
+  otelContext.setGlobalContextManager(new AsyncLocalStorageContextManager());
 
   // Load environment
   if (config.loadEnv !== false) {

@@ -18,15 +18,15 @@ export class Span implements ISpan {
   public endTimeNs?: number;
   public name: string;
   public parentSpanId?: string;
+  public otelSpan: OTelSpan;
 
-  private otelSpan: OTelSpan;
-  private provider: TracerProvider;
+  private provider?: TracerProvider;
   private ended = false;
 
   constructor(name: string, otelSpan: OTelSpan, provider?: TracerProvider, parentSpanId?: string, attributes?: Record<string, unknown>) {
     this.name = name;
     this.otelSpan = otelSpan;
-    this.provider = provider as TracerProvider;
+    this.provider = provider;
     this.parentSpanId = parentSpanId;
     this.attributes = attributes ? { ...attributes } : {};
     this.startTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
@@ -38,7 +38,7 @@ export class Span implements ISpan {
       traceId: ctx.traceId,
       spanId: ctx.spanId,
       traceFlags: ctx.traceFlags,
-      traceState: ctx.traceState?.serialize()
+      traceState: ctx.traceState?.serialize() || undefined
     };
   }
 
