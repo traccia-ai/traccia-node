@@ -12,11 +12,16 @@ export interface ObserveOptions {
     asType?: 'span' | 'tool' | 'llm' | 'guardrail';
     as_type?: 'span' | 'tool' | 'llm' | 'guardrail';
     skipArgs?: string[];
+    skip_args?: string[];
     skipResult?: boolean;
+    skip_result?: boolean;
     tags?: string[];
     guardrailName?: string;
     guardrailCategory?: string;
 }
+
+import { safeSerializeArgs, safeStringify } from './serialization';
+export { safeSerializeArgs, safeStringify };
 
 /**
  * Decorator/Wrapper to create spans around functions.
@@ -76,13 +81,12 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
             attributes['span.tags'] = options.tags;
         }
 
-        // Capture arguments
-        if (options.skipArgs) {
-            // Simple index-based capture or similar matching could be implemented here
-            // For now, simpler than Python's introspection:
-            attributes['function.args'] = JSON.stringify(args).slice(0, 1000);
-        } else {
-            attributes['function.args'] = JSON.stringify(args).slice(0, 1000);
+        // Capture arguments safely
+        const skipArgsList = options.skipArgs || options.skip_args;
+        try {
+            attributes['function.args'] = safeSerializeArgs(args, skipArgsList);
+        } catch {
+            // Telemetry capture failures must not stop ordinary application execution
         }
 
         // Auto-set guardrail attributes if type is guardrail
@@ -121,7 +125,7 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
                 }
 
                 // Capture result
-                if (!options.skipResult) {
+                if (!options.skipResult && !options.skip_result) {
                     try {
                         const resStr = typeof result === 'string' ? result : JSON.stringify(result);
                         span.setAttribute('result', resStr.slice(0, 1000));
