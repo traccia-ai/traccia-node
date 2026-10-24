@@ -4,8 +4,16 @@
 
 import axios, { AxiosInstance } from 'axios';
 import { loadConfig } from '../config/config';
-import { getAgentId, pepEnabled } from '../config/runtime-config';
+import { getAgentId, getConfig, pepEnabled } from '../config/runtime-config';
 import { getCurrentSpan } from '../context/context';
+import {
+  lastReads,
+  MAX_READS_PER_SCOPE,
+  promptByTrace,
+  ReadEvidence,
+  retrievalByTrace,
+  traceKey,
+} from './evidence';
 import { AgentBlockedError, ApprovalPending } from './policy';
 
 const CHECK_PATH = '/api/v1/policy/check';
@@ -14,9 +22,7 @@ const BUDGET_TTL_MS = 5000;
 
 let httpClient: AxiosInstance = axios.create({ timeout: 2000 });
 const remainingBudget = new Map<string, { ts: number; value: number }>();
-const lastReads = new Map<string, { tool: string; read_at: string; field: string }>();
-const retrievalByTrace = new Map<string, { present?: boolean; chunk_count?: unknown }>();
-const promptByTrace = new Map<string, { name: string; label?: unknown; version_id?: unknown }>();
+const RESOURCE_ID_KEYS = ['resource_id', 'customer_id', 'id'] as const;
 
 export function _setPepHttpClientForTests(client: AxiosInstance): void {
   httpClient = client;
@@ -30,15 +36,63 @@ export function _resetPepStateForTests(): void {
   httpClient = axios.create({ timeout: 2000 });
 }
 
-export function rememberToolResult(name: string, result: unknown): void {
+/** The entity a tool call reads or writes, when its arguments or result name one. */
+function resourceId(row: unknown): string | undefined {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    return undefined;
+  }
+  const record = row as Record<string, unknown>;
+  const customer = customerId(record);
+  if (customer) {
+    return customer;
+  }
+  for (const key of RESOURCE_ID_KEYS) {
+    const value = record[key];
+    if (value != null && value !== '' && typeof value !== 'object') {
+      return String(value);
+    }
+  }
+  return undefined;
+}
+
+/** Freshness evidence belongs to one tenant, agent and run (trace). */
+function readScope(): { key: string; traceId: string } | undefined {
+  const traceId = traceKey(getCurrentSpan()?.context?.traceId);
+  if (!traceId) {
+    return undefined;
+  }
+  const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID || '';
+  const tenantId = getConfig().tenantId || '';
+  return { key: JSON.stringify([tenantId, agentId, traceId]), traceId };
+}
+
+export function rememberToolResult(name: string, result: unknown, args?: unknown): void {
   if (!name || !result || typeof result !== 'object' || Array.isArray(result)) {
+    return;
+  }
+  const scope = readScope();
+  if (!scope) {
     return;
   }
   const row = result as Record<string, unknown>;
   for (const field of ['as_of', 'updated_at'] as const) {
     const value = row[field];
     if (value != null && value !== '') {
-      lastReads.set(name, { tool: name, read_at: String(value), field });
+      const entry: ReadEvidence = { tool: name, read_at: String(value), field };
+      const resource = resourceId(args) || resourceId(row);
+      if (resource) {
+        entry.resource_id = resource;
+      }
+      lastReads.update(scope.key, scope.traceId, (current) => {
+        const reads = new Map(current);
+        const key = JSON.stringify([name, resource ?? null]);
+        reads.delete(key);
+        reads.set(key, entry);
+        while (reads.size > MAX_READS_PER_SCOPE) {
+          reads.delete(reads.keys().next().value as string);
+        }
+        return reads;
+      });
       return;
     }
   }
@@ -48,7 +102,8 @@ export function noteRetrievalAttributes(
   traceId: string | undefined,
   attributes: Record<string, unknown> | undefined,
 ): void {
-  if (!traceId || !attributes) {
+  const key = traceKey(traceId);
+  if (!key || !attributes) {
     return;
   }
   const chunk = attributes['traccia.retrieval.chunk_count'];
@@ -56,25 +111,36 @@ export function noteRetrievalAttributes(
   if (chunk == null && presentFlag == null) {
     return;
   }
-  const entry = retrievalByTrace.get(traceId) || {};
-  if (presentFlag === true || chunk != null) {
-    entry.present = true;
-  }
-  if (chunk != null) {
-    entry.chunk_count = chunk;
-  }
-  retrievalByTrace.set(traceId, entry);
+  retrievalByTrace.update(key, key, (current) => {
+    const entry = { ...(current || {}) };
+    if (presentFlag === true || chunk != null) {
+      entry.present = true;
+    }
+    if (chunk != null) {
+      entry.chunk_count = chunk;
+    }
+    return entry;
+  });
 }
 
-function freshnessContext(): Array<Record<string, string>> {
-  return Array.from(lastReads.values()).map((item) => ({ ...item }));
+/** Reads from this run only, newest first; skip reads of a different entity than the one being written. */
+function freshnessContext(resource?: string): Array<Record<string, string>> {
+  const scope = readScope();
+  if (!scope) {
+    return [];
+  }
+  const reads = Array.from(lastReads.get(scope.key)?.values() || []).reverse();
+  return reads
+    .filter((item) => !(resource && item.resource_id && item.resource_id !== resource))
+    .map((item) => ({ ...item }) as Record<string, string>);
 }
 
 function retrievalContext(traceId: string | undefined): Record<string, unknown> {
-  if (!traceId) {
+  const key = traceKey(traceId);
+  if (!key) {
     return { present: false };
   }
-  const found = retrievalByTrace.get(traceId);
+  const found = retrievalByTrace.get(key);
   if (!found) {
     return { present: false };
   }
@@ -96,14 +162,14 @@ export function notePromptAttributes(
   if (!name) {
     return;
   }
-  const key = asOtelHex(traceId, 32);
+  const key = traceKey(traceId);
   if (!key) {
     return;
   }
   const entry: { name: string; label?: unknown; version_id?: unknown } = { name: String(name) };
   if (attributes['traccia.prompt.label']) entry.label = attributes['traccia.prompt.label'];
   if (attributes['traccia.prompt.version_id']) entry.version_id = attributes['traccia.prompt.version_id'];
-  promptByTrace.set(key, entry);
+  promptByTrace.update(key, key, () => entry);
 }
 
 function promptFromAttributes(attributes?: Record<string, unknown> | null): Record<string, unknown> {
@@ -123,7 +189,7 @@ function promptContext(): Record<string, unknown> {
   if (fromSpan.name) {
     return fromSpan;
   }
-  const traceId = asOtelHex(span?.context?.traceId, 32);
+  const traceId = traceKey(span?.context?.traceId);
   if (!traceId) {
     return fromSpan;
   }
@@ -399,7 +465,7 @@ export async function enforceToolCall(
     return undefined;
   }
   const context: Record<string, unknown> = { input: args, tool_name: name };
-  const freshness = freshnessContext();
+  const freshness = freshnessContext(resourceId(args));
   if (freshness.length) {
     context.freshness = freshness;
   }

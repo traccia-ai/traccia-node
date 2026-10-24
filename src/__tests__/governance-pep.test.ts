@@ -309,8 +309,15 @@ describe('governance pep', () => {
   });
 
   it('sends the last read timestamp and customer id on a write check', async () => {
-    rememberToolResult('search', { q: 'x' });
-    rememberToolResult('get_refund_policy', { as_of: '2026-09-24T11:40:00Z', text: 'policy' });
+    jest.spyOn(spanContext, 'getCurrentSpan').mockReturnValue({
+      context: { traceId: 'run-1', spanId: 'span-1', traceFlags: 1 },
+      attributes: {},
+      setAttribute: jest.fn(),
+    } as never);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      rememberToolResult('search', { q: 'x' });
+      rememberToolResult('get_refund_policy', { as_of: '2026-09-24T11:40:00Z', text: 'policy' });
+    });
     const client = axios.create();
     const post = jest.spyOn(client, 'post').mockResolvedValue({
       status: 200,
