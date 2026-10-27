@@ -181,4 +181,31 @@ await run('streamDroppedPartlyRead', async () => {
   await collectUntilEnded();
 });
 
+// Collecting the create() promise must never end or settle a call that is still in flight.
+const asResponseInFlight = async () => {
+  const pending = create().asResponse();
+  for (let i = 0; i < 5; i++) {
+    await sleep(20);
+    globalThis.gc?.();
+  }
+  results.endedBeforeResponse = spans[0]?.ended ?? 0;
+  await (await pending).json();
+  await collectUntilEnded();
+};
+fetchDelay = 200;
+await run('asResponseSlowRequest', asResponseInFlight);
+results.asResponseSlowRequest.endedBeforeResponse = results.endedBeforeResponse;
+fetchDelay = 0;
+checkDelay = 200;
+await run('asResponseSlowCheck', asResponseInFlight);
+results.asResponseSlowCheck.endedBeforeResponse = results.endedBeforeResponse;
+await run('fireAndForgetSlowCheck', async () => {
+  create();
+  await sleep(10);
+  globalThis.gc?.();
+  await collectUntilEnded();
+});
+checkDelay = 0;
+delete results.endedBeforeResponse;
+
 process.stdout.write(JSON.stringify({ patchGroq, patchGroqEsm, results }));

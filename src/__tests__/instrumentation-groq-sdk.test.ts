@@ -133,6 +133,28 @@ describe.each(['esm', 'cjs'] as const)('real groq-sdk loaded as %s', (mode) => {
     }
   );
 
+  it.each(['asResponseSlowRequest', 'asResponseSlowCheck'])(
+    '%s: collecting the create() promise mid-flight neither ends nor settles the call early',
+    (name) => {
+      const result = run.results[name] as Scenario & { endedBeforeResponse: number };
+      expect(result.error).toBeUndefined();
+      expect(result.endedBeforeResponse).toBe(0);
+      expect(result.checks).toBe(1);
+      expect(result.spans).toEqual([{ ended: 1, vendor: 'groq' }]);
+      // Settled with the usage read from the raw response, not the full reservation.
+      expect(result.settles).toEqual([PRICED_SETTLE]);
+    }
+  );
+
+  it('a call never awaited, collected while its policy check is pending, settles that check', () => {
+    const result = run.results.fireAndForgetSlowCheck;
+    expect(result.checks).toBe(1);
+    expect(result.spans).toEqual([{ ended: 1, vendor: 'groq' }]);
+    expect(result.settles).toEqual([
+      { agent_id: 'agent-a', reserved_usd: 0.5, actual_usd: 0.5, release: false },
+    ]);
+  });
+
   it.each(['httpError', 'abortedBeforeSend'])(
     '%s: the error reaches the caller, the span errors, and the reservation is released',
     (name) => {

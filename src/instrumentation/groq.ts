@@ -300,6 +300,9 @@ class CallState {
   /** next()/return() calls in progress. groq-sdk's own aborts happen inside them. */
   public iterating = 0;
   private done = false;
+  /** Whether the policy check has finished and the request has started (see waitFor). */
+  private hasStarted = true;
+  private started: Promise<void> | undefined;
   private detachAbort: (() => void) | undefined;
   private readonly parts: string[] = [];
   /** Output characters streamed so far (content and tool call arguments). */
@@ -318,6 +321,19 @@ class CallState {
     private readonly span: ISpan,
     private readonly promptTokens: number | undefined
   ) {}
+
+  /**
+   * Hold finalization until `started` (the policy check and the start of the request) has
+   * settled, so a call collected before then still settles the reservation its check made.
+   * Keeps no reference to the value, which leads to the response and stream.
+   */
+  public waitFor(started: Promise<unknown>): void {
+    this.hasStarted = false;
+    const done = (): void => {
+      this.hasStarted = true;
+    };
+    this.started = started.then(done, done);
+  }
 
   /**
    * Collect content, finish reason and usage from one ChatCompletionChunk.
@@ -447,10 +463,18 @@ class CallState {
         this.span.end();
       }
     };
-    if (this.scope) {
-      this.scope.runInAsyncScope(run);
+    const runInScope = (): void => {
+      if (this.scope) {
+        this.scope.runInAsyncScope(run);
+      } else {
+        run();
+      }
+    };
+    if (!this.hasStarted && this.started !== undefined) {
+      // Only garbage collection gets here: settle once the check has decided.
+      void this.started.then(runInScope);
     } else {
-      run();
+      runInScope();
     }
     return Promise.resolve();
   }
@@ -635,6 +659,8 @@ function traceIterator(
  */
 class GroqCall {
   public started: Promise<{ api: GroqApiPromise }>;
+  /** Settles once asResponse() has recorded a non-streaming call from its raw response. */
+  public recorded: Promise<void> = Promise.resolve();
 
   public constructor(
     public readonly state: CallState,
@@ -671,7 +697,7 @@ class GroqCall {
       .then(
         (response) => {
           if (!this.streaming) {
-            void this.recordRawResponse(response);
+            this.recorded = this.recordRawResponse(response);
           }
           return response;
         },
@@ -703,6 +729,11 @@ class GroqCall {
       // Unreadable: the data, if awaited, or garbage collection settles the call instead.
     }
   }
+}
+
+/** Does nothing; a closure that calls it keeps `value` reachable for as long as it lives. */
+function keepReachable(_value: unknown): void {
+  // Intentionally empty.
 }
 
 /**
@@ -755,7 +786,18 @@ class TracedApiPromise<T> extends Promise<T> {
 
   /** The raw `Response`, with the body unread. */
   public asResponse(): Promise<unknown> {
-    return this.call.asResponse();
+    const response = this.call.asResponse();
+    // The returned chain does not reference this promise, so without this it could be
+    // collected, and the call settled, while the request is still in flight. Keep it
+    // reachable until the raw response has arrived and been recorded.
+    // (Referenced, not returned: returning this thenable would parse the body.)
+    void response
+      .then(
+        () => this.call.recorded,
+        () => undefined
+      )
+      .then(() => keepReachable(this));
+    return response;
   }
 
   /** The parsed data and the raw `Response`. */
@@ -830,6 +872,7 @@ export function wrapGroqChatCompletionsCreate<F extends (...args: never[]) => un
     });
     // The caller observes failures through the returned promise.
     call.started.catch(() => undefined);
+    state.waitFor(call.started);
     return new TracedApiPromise(call);
   } as PatchedFn;
   wrapped._agentTracePatched = true;
