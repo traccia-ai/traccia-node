@@ -865,6 +865,58 @@ describe('Groq Instrumentation', () => {
       expect(settles[0].opts).toEqual(estimated(4));
     });
 
+    describe('reasoning streams interrupted before usage', () => {
+      // 10 chunks of 4,250 reasoning characters: 42,500 characters, 10,625 tokens.
+      const reasoningChunk = (): Record<string, unknown> => ({
+        model: MODEL,
+        choices: [{ delta: { reasoning: 'r'.repeat(4250) }, finish_reason: null }],
+      });
+      const reasoning = Array.from({ length: 10 }, reasoningChunk);
+      const usageChunk = {
+        model: MODEL,
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        x_groq: { usage: { prompt_tokens: 5, completion_tokens: 10700, total_tokens: 10705 } },
+      };
+
+      it('a loop stopped before usage counts the reasoning', async () => {
+        const { traced } = streamWrap(new FakeStream([...reasoning, usageChunk]));
+        let read = 0;
+        for await (const _ of await traced({ model: MODEL, messages: MSGS, stream: true })) {
+          if (++read === reasoning.length) break;
+        }
+        expect(settles).toEqual([expect.objectContaining({ opts: estimated(10625) })]);
+      });
+
+      it('an abort before usage counts the reasoning', async () => {
+        const stream = new FakeStream([...reasoning, usageChunk]);
+        const { traced } = streamWrap(stream);
+        let read = 0;
+        for await (const _ of await traced({ model: MODEL, messages: MSGS, stream: true })) {
+          if (++read === reasoning.length) stream.controller.abort();
+        }
+        expect(mockSpan.statusDescription).toBe('aborted');
+        expect(settles).toEqual([expect.objectContaining({ opts: estimated(10625) })]);
+      });
+
+      it('an error before usage counts the reasoning', async () => {
+        const error = new Error('connection reset');
+        const { traced } = streamWrap(new FakeStream(reasoning, error));
+        await expect(readAll(await traced({ model: MODEL, messages: MSGS, stream: true }))).rejects.toBe(error);
+        expect(settles).toEqual([expect.objectContaining({ opts: estimated(10625) })]);
+      });
+
+      it('a reply with reasoning and no usage counts the reasoning', async () => {
+        const response = {
+          model: MODEL,
+          choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: 'Paris.', reasoning: 'r'.repeat(42494) } }],
+        };
+        const { traced } = wrap(() => new FakeAPIPromise(response));
+        await traced({ model: MODEL, messages: MSGS });
+        // 42,494 reasoning + 6 content characters: 42,500, so 10,625 tokens.
+        expect(settles[0].opts).toEqual(estimated(10625));
+      });
+    });
+
     it('a stream that ended without output or usage settles a one-token estimate', async () => {
       const { traced } = streamWrap(new FakeStream([chunk(undefined)]));
       await readAll(await traced({ model: MODEL, messages: MSGS, stream: true }));

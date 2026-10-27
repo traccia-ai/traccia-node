@@ -221,11 +221,15 @@ function cachedTokens(usage: unknown, prompt: unknown): number {
 }
 
 /**
- * Characters of output in a message or delta: its content plus any tool call arguments.
+ * Characters of output in a message or delta: its content, its reasoning (Groq bills reasoning
+ * tokens as output) and any tool call arguments.
  */
 function outputChars(message: unknown): number {
-  const content = safeGet(message, 'content');
-  let chars = typeof content === 'string' ? content.length : 0;
+  let chars = 0;
+  for (const field of ['content', 'reasoning']) {
+    const text = safeGet(message, field);
+    chars += typeof text === 'string' ? text.length : 0;
+  }
   const toolCalls = safeGet(message, 'tool_calls');
   if (Array.isArray(toolCalls)) {
     for (const call of toolCalls) {
