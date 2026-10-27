@@ -1,4 +1,4 @@
-import { PricingRates } from '../config/pricing-config';
+import { PricingRates, loadPricingWithSource } from '../config/pricing-config';
 import { getResolver, CostResolver, setResolver } from '../processor/cost-resolver';
 
 describe('CostResolver', () => {
@@ -179,6 +179,50 @@ describe('CostResolver', () => {
         'groq/qwen/qwen3-32b': rates(0.00029, 0.00059, 'groq'),
       });
       expect(resolver.compute('qwen/qwen3-32b', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(0.00088);
+    });
+
+    describe('explicit pricing overrides', () => {
+      // Built the way init({ pricingOverride }) builds it: the shipped snapshot, then the override.
+      const withOverride = async (override: Record<string, PricingRates>) => {
+        const [table] = await loadPricingWithSource(override);
+        return new CostResolver(table);
+      };
+
+      it('win over the bundled Groq entry for a Groq call', async () => {
+        const r = await withOverride({ 'llama-3.3-70b-versatile': { inputCost: 1.5, outputCost: 1.5 } });
+        expect(r.matchPricingModelKey('llama-3.3-70b-versatile', 'groq')).toBe('llama-3.3-70b-versatile');
+        expect(r.compute('llama-3.3-70b-versatile', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(3);
+        expect(r.compute('llama-3.3-70b-versatile', 1000, 1000)).toBeCloseTo(3);
+      });
+
+      it('win for a slash-containing Groq model id', async () => {
+        const r = await withOverride({ 'openai/gpt-oss-120b': { inputCost: 1, outputCost: 2 } });
+        expect(r.compute('openai/gpt-oss-120b', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(3);
+      });
+
+      // For a Groq call, an override without a provider field is used when its key path (all
+      // but the last segment) is empty, equals the model's path, or is a groq-family provider
+      // followed by the model's path.
+      it.each([
+        ['llama-3.3-70b-versatile', 'llama-3.3-70b-versatile', true],
+        ['llama-3.3-70b-versatile', 'groq/llama-3.3-70b-versatile', true],
+        ['llama-3.3-70b-versatile', 'together_ai/llama-3.3-70b-versatile', false],
+        ['openai/gpt-oss-120b', 'openai/gpt-oss-120b', true],
+        ['openai/gpt-oss-120b', 'gpt-oss-120b', true],
+        ['openai/gpt-oss-120b', 'groq/openai/gpt-oss-120b', true],
+        ['openai/gpt-oss-120b', 'together_ai/openai/gpt-oss-120b', false],
+      ])('a Groq call to %s uses an override keyed %s: %s', async (model, key, used) => {
+        const unpriced = (await withOverride({})).compute(model, 1000, 1000, 0, 0, 'groq');
+        const r = await withOverride({ [key]: { inputCost: 1, outputCost: 2 } });
+        expect(r.compute(model, 1000, 1000, 0, 0, 'groq')).toBeCloseTo(used ? 3 : unpriced!, 10);
+      });
+
+      it("never price a Groq call from an override for another provider's entry", async () => {
+        const r = await withOverride({
+          'together_ai/llama-3.3-70b-versatile': { inputCost: 1.5, outputCost: 1.5, _provider: 'together_ai' },
+        });
+        expect(r.compute('llama-3.3-70b-versatile', 1000, 1000, 0, 0, 'groq')).toBeCloseTo(0.00138);
+      });
     });
 
     it('ignores a vendor that is not strict', () => {
