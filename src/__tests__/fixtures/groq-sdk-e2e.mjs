@@ -11,9 +11,14 @@ process.env.TRACCIA_ENDPOINT = 'http://localhost:9/v1/traces';
 const lib = createRequire(import.meta.url)(libPath);
 
 const posts = [];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Delays for the policy check and the Groq request, set per scenario.
+let checkDelay = 0;
+let fetchDelay = 0;
 lib._setPepHttpClientForTests({
   post: async (url, body) => {
     posts.push({ url, body: JSON.parse(JSON.stringify(body)) });
+    if (url.endsWith('/check')) await sleep(checkDelay);
     const data = url.endsWith('/check') ? { effect: 'allow', obligations: { reserved_usd: 0.5 } } : {};
     return { status: 200, data };
   },
@@ -70,6 +75,7 @@ const sse = (chunks) =>
 let status = 200;
 const fetch = async (_url, init) => {
   const body = JSON.parse(init.body);
+  await sleep(fetchDelay);
   if (status !== 200) {
     return new Response(JSON.stringify({ error: { message: 'bad request' } }), {
       status,
@@ -149,6 +155,30 @@ await run('fireAndForget', async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     globalThis.gc?.();
   }
+});
+
+/** Force garbage collection until the first span ends, for up to a second. */
+async function collectUntilEnded() {
+  for (let i = 0; i < 50 && spans[0]?.ended !== 1; i++) {
+    await sleep(20);
+    globalThis.gc?.();
+  }
+}
+
+// A stream the caller drops must still end its span and settle once it is collected.
+await run('streamDroppedUnread', async () => {
+  await (async () => {
+    await create({ stream: true });
+  })();
+  await collectUntilEnded();
+});
+await run('streamDroppedPartlyRead', async () => {
+  await (async () => {
+    const it = (await create({ stream: true }))[Symbol.asyncIterator]();
+    await it.next();
+    await it.next();
+  })();
+  await collectUntilEnded();
 });
 
 process.stdout.write(JSON.stringify({ patchGroq, patchGroqEsm, results }));

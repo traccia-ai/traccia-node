@@ -52,19 +52,18 @@ interface GroqApiPromise extends PromiseLike<unknown> {
   asResponse?: () => Promise<unknown>;
 }
 
+/** The parts of an AbortSignal the wrapper relies on. */
+interface AbortSignalLike {
+  aborted?: boolean;
+  addEventListener?: (type: 'abort', listener: () => void, options?: { once?: boolean }) => void;
+  removeEventListener?: (type: 'abort', listener: () => void) => void;
+}
+
 /** The parts of groq-sdk's Stream the wrapper relies on. */
 interface GroqStream {
   iterator?: () => AsyncIterator<unknown>;
   controller?: {
-    signal?: {
-      aborted?: boolean;
-      addEventListener?: (
-        type: 'abort',
-        listener: () => void,
-        options?: { once?: boolean }
-      ) => void;
-      removeEventListener?: (type: 'abort', listener: () => void) => void;
-    };
+    signal?: AbortSignalLike;
   };
 }
 
@@ -369,20 +368,7 @@ class CallState {
     abandoned?.register(stream as object, this, this);
     const signal = stream.controller?.signal;
     if (signal) {
-      // An abort while no read is in progress ends the span now. groq-sdk also aborts the
-      // request when a loop stops early or fails, but only inside next()/return(), which
-      // record those outcomes themselves.
-      const onAbort = (): void => {
-        if (state.iterating === 0) {
-          void state.finalize({ kind: 'aborted' });
-        }
-      };
-      if (signal.aborted) {
-        onAbort();
-      } else if (signal.addEventListener) {
-        signal.addEventListener('abort', onAbort, { once: true });
-        this.detachAbort = (): void => signal.removeEventListener?.('abort', onAbort);
-      }
+      this.detachAbort = finalizeOnAbort(signal, this);
     }
   }
 
@@ -558,6 +544,32 @@ class CallState {
       // Metrics are best-effort.
     }
   }
+}
+
+/**
+ * An abort while no read is in progress ends the span now. groq-sdk also aborts the request
+ * when a loop stops early or fails, but only inside next()/return(), which record those
+ * outcomes themselves. Returns a function that removes the listener.
+ *
+ * A separate function on purpose: the state keeps the returned closure, and a closure made in
+ * traceStream would share that function's context, which holds the stream. The state would
+ * then keep the stream alive, so a dropped stream would never be collected and settled.
+ */
+function finalizeOnAbort(signal: AbortSignalLike, state: CallState): (() => void) | undefined {
+  const onAbort = (): void => {
+    if (state.iterating === 0) {
+      void state.finalize({ kind: 'aborted' });
+    }
+  };
+  if (signal.aborted) {
+    onAbort();
+    return undefined;
+  }
+  if (!signal.addEventListener) {
+    return undefined;
+  }
+  signal.addEventListener('abort', onAbort, { once: true });
+  return (): void => signal.removeEventListener?.('abort', onAbort);
 }
 
 /**
