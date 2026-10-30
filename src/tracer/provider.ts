@@ -3,8 +3,36 @@
  */
 
 import { randomBytes } from 'crypto';
+import {
+  BasicTracerProvider,
+  ParentBasedSampler,
+  Sampler as OTelSampler,
+  SamplingDecision,
+} from '@opentelemetry/sdk-trace-base';
 import { ITracerProvider, ITracer, ISpanProcessor, ISampler, ISpan, Resource } from '../types';
+import { SwitchableSampler, defaultOtelSampler } from '../processor/sampler';
 import { Tracer } from './tracer';
+
+/**
+ * Turn a Traccia sampler into the OTel sampler applied at span creation.
+ * Custom ISampler implementations decide roots; children follow their parent.
+ */
+function toOtelSampler(sampler: ISampler): OTelSampler {
+  const withOtel = sampler as ISampler & { toOtelSampler?: () => OTelSampler };
+  if (typeof withOtel.toOtelSampler === 'function') {
+    return withOtel.toOtelSampler();
+  }
+  return new ParentBasedSampler({
+    root: {
+      shouldSample: () => ({
+        decision: sampler.shouldSample().sampled
+          ? SamplingDecision.RECORD_AND_SAMPLED
+          : SamplingDecision.NOT_RECORD,
+      }),
+      toString: () => 'TracciaSampler',
+    },
+  });
+}
 
 /**
  * TracerProvider manages tracers and span processors.
@@ -14,6 +42,8 @@ export class TracerProvider implements ITracerProvider {
   private spanProcessors: ISpanProcessor[] = [];
   private sampler?: ISampler;
   private resource: Resource = {};
+  private readonly samplerSwitch = new SwitchableSampler();
+  private readonly otelProvider = new BasicTracerProvider({ sampler: this.samplerSwitch });
 
   constructor(resource?: Resource) {
     this.resource = resource || {};
@@ -57,10 +87,23 @@ export class TracerProvider implements ITracerProvider {
   }
 
   /**
-   * Set the sampler.
+   * Set the sampler and apply it at span creation.
+   *
+   * Takes effect for every span started after this call, including spans from
+   * tracers created earlier. Child spans follow their parent's decision, so
+   * unsampled traces get traceFlags 0 and export processors drop them.
+   * Pass undefined to restore the default (parent-based, always on).
    */
-  setSampler(sampler: ISampler): void {
+  setSampler(sampler: ISampler | undefined): void {
     this.sampler = sampler;
+    this.samplerSwitch.delegate = sampler ? toOtelSampler(sampler) : defaultOtelSampler();
+  }
+
+  /**
+   * The OTel provider that creates this provider's spans.
+   */
+  getOtelTracerProvider(): BasicTracerProvider {
+    return this.otelProvider;
   }
 
   /**

@@ -17,8 +17,9 @@ export class Tracer implements ITracer {
 
   constructor(provider: TracerProvider, instrumentationScope: string) {
     this.provider = provider;
-    // Get native OTel tracer
-    this.otelTracer = trace.getTracer(instrumentationScope);
+    // OTel tracer from this provider's own OTel provider, so its sampler
+    // applies even when another global OTel provider is registered.
+    this.otelTracer = provider.getOtelTracerProvider().getTracer(instrumentationScope);
   }
 
   /**
@@ -39,14 +40,14 @@ export class Tracer implements ITracer {
       activeContext = trace.setSpanContext(activeContext, {
         traceId: options.parentContext.traceId,
         spanId: options.parentContext.spanId,
-        traceFlags: options.parentContext.traceFlags || 1,
+        traceFlags: options.parentContext.traceFlags ?? 1,
         isRemote: true
       });
     } else if (options?.parent) {
       activeContext = trace.setSpanContext(activeContext, {
         traceId: options.parent.context.traceId,
         spanId: options.parent.context.spanId,
-        traceFlags: options.parent.context.traceFlags || 1,
+        traceFlags: options.parent.context.traceFlags ?? 1,
         isRemote: false
       });
     } else if (options?.parent === null) {
@@ -59,7 +60,7 @@ export class Tracer implements ITracer {
         activeContext = trace.setSpanContext(activeContext, {
           traceId: currentSpan.context.traceId,
           spanId: currentSpan.context.spanId,
-          traceFlags: currentSpan.context.traceFlags || 1,
+          traceFlags: currentSpan.context.traceFlags ?? 1,
           isRemote: false
         });
       }

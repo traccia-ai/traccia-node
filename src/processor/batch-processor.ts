@@ -26,7 +26,6 @@ export class BatchSpanProcessor implements ISpanProcessor {
   private maxExportBatchSize: number;
   private scheduleDelayMs: number;
   private dropPolicy: DropPolicy;
-  private sampler?: ISampler;
 
   private queue: ISpan[] = [];
   private _shutdown = false;
@@ -39,6 +38,7 @@ export class BatchSpanProcessor implements ISpanProcessor {
     maxExportBatchSize?: number;
     scheduleDelayMs?: number;
     dropPolicy?: DropPolicy;
+    /** @deprecated Ignored. Sampling is applied at span creation (TracerProvider.setSampler) and unsampled spans are always dropped. */
     sampler?: ISampler;
   } = {}) {
     this.exporter = options.exporter;
@@ -46,7 +46,6 @@ export class BatchSpanProcessor implements ISpanProcessor {
     this.maxExportBatchSize = options.maxExportBatchSize || DEFAULT_MAX_EXPORT_BATCH_SIZE;
     this.scheduleDelayMs = options.scheduleDelayMs || DEFAULT_SCHEDULE_DELAY_MS;
     this.dropPolicy = options.dropPolicy || DropPolicy.DROP_OLDEST;
-    this.sampler = options.sampler;
 
     this.startSchedule();
   }
@@ -59,8 +58,9 @@ export class BatchSpanProcessor implements ISpanProcessor {
       return;
     }
 
-    // Apply head-based sampling: drop non-sampled traces
-    if (this.sampler && span.context.traceFlags === 0) {
+    // Head sampling is decided at span creation and recorded as traceFlags 0.
+    // Drop those spans whether or not this processor was given a sampler.
+    if (span.context.traceFlags === 0) {
       return;
     }
 
