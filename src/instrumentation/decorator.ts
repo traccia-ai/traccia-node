@@ -102,16 +102,16 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
             }
 
             try {
+                const toolArgs =
+                    args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])
+                        ? (args[0] as Record<string, unknown>)
+                        : { args };
                 if (spanType === 'tool') {
-                    const toolArgs =
-                        args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])
-                            ? (args[0] as Record<string, unknown>)
-                            : { args };
                     await enforceToolCall(name, toolArgs);
                 }
                 const result = await fn.apply(this, args);
                 if (spanType === 'tool') {
-                    rememberToolResult(name, result);
+                    rememberToolResult(name, result, toolArgs);
                 }
                 noteRetrievalAttributes(span.context?.traceId, span.attributes);
 
