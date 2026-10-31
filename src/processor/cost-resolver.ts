@@ -372,7 +372,9 @@ function modelTail(key: string): string {
   if (dot > 0) {
     const head = tail.slice(0, dot);
     const rest = tail.slice(dot + 1);
-    if (/^[a-z][a-z0-9-]*$/i.test(head) && rest.includes("-")) return rest;
+    // A dotted provider prefix (bedrock's "anthropic.claude-...") is letters and hyphens
+    // only, as in traccia-py; in "llama-3.3-70b" the dot is part of the version.
+    if (/^[a-z]+(-[a-z]+)*$/i.test(head) && rest.includes("-")) return rest;
   }
   return tail;
 }

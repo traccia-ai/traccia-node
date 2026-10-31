@@ -26,14 +26,17 @@ export function setCachedPricing(pricing: PricingTable): void {
 }
 
 /**
- * Compute cost for a given model and token counts.
+ * Compute cost for a given model and token counts. A vendor in STRICT_VENDORS is priced only
+ * from its own entries. promptTokens is uncached input; cacheReadTokens use the cached rate.
  */
 export function computeCost(
   model: string,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  vendor?: string,
+  cacheReadTokens = 0
 ): number | undefined {
-  return getResolver().compute(model, promptTokens, completionTokens);
+  return getResolver().compute(model, promptTokens, completionTokens, cacheReadTokens, 0, vendor);
 }
 
 function checkAndLogStaleness(generatedAt: string, ageDays: number | undefined): void {
