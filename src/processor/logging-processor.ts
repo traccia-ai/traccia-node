@@ -9,6 +9,10 @@ import { ISpan, ISpanProcessor } from '../types';
  */
 export class LoggingSpanProcessor implements ISpanProcessor {
   onEnd(span: ISpan): void {
+    // Logging is an output path: skip spans the sampler dropped.
+    if (span.context.traceFlags === 0) {
+      return;
+    }
     console.log(`[Span] ${span.name} (${span.context.traceId})`, {
       spanId: span.context.spanId,
       duration: span.durationNs,

@@ -3,7 +3,6 @@
  */
 
 import { TracerProvider } from './tracer/provider';
-import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
 import { trace } from '@opentelemetry/api';
 import { BatchSpanProcessor } from './processor/batch-processor';
 import { Sampler } from './processor/sampler';
@@ -103,7 +102,11 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   runtimeState().started = true;
 
-  const basicProvider = new BasicTracerProvider();
+  // Get or create provider. Its own OTel provider creates Traccia spans and
+  // carries the sampler; registering it globally is best effort, since OTel
+  // keeps the first global provider for the life of the process.
+  const provider = getTracerProvider();
+  const basicProvider = provider.getOtelTracerProvider();
   trace.setGlobalTracerProvider(basicProvider);
 
   // Load environment
@@ -210,12 +213,12 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     }
   }
 
-  // Get or create provider
-  const provider = getTracerProvider();
-
-  // Set sampler
-  // Set sampler
-  const sampler = new Sampler(Math.min(1, Math.max(0, sampleRate)));
+  // Parent-based head sampling at span creation: unsampled traces get
+  // traceFlags 0 and every export processor drops them.
+  // A non-numeric env value parses to NaN, which OTel treats as 0 (drop
+  // everything); fall back to the default instead, like the Python SDK.
+  const safeSampleRate = Number.isFinite(sampleRate) ? sampleRate : 1.0;
+  const sampler = new Sampler(Math.min(1, Math.max(0, safeSampleRate)));
   provider.setSampler(sampler);
 
   // Create exporter
