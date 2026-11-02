@@ -4,6 +4,7 @@
 
 import { observe, ObserveOptions } from '../instrumentation/decorator';
 import { getAgentId, runIdentity } from '../config/runtime-config';
+import { governedRun } from './evidence';
 import { checkAgentStatus } from './policy';
 
 export interface GovernOptions extends ObserveOptions {
@@ -48,7 +49,7 @@ function createGovernWrapper(
     };
     if (agentId?.trim()) identity.agentId = agentId.trim();
     if (agentName) identity.agentName = agentName;
-    return runIdentity(identity, () => observedFn.apply(thisArg, args));
+    return runIdentity(identity, () => governedRun(() => Promise.resolve(observedFn.apply(thisArg, args))));
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

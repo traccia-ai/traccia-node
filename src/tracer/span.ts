@@ -5,6 +5,7 @@
 import { Span as OTelSpan, SpanStatusCode } from '@opentelemetry/api';
 import { ISpan, SpanStatus, SpanEvent, ISpanContext } from '../types';
 import type { TracerProvider } from './provider';
+import { forgetTrace } from '../governance/evidence';
 
 /**
  * Span implementation representing a unit of work.
@@ -109,6 +110,11 @@ export class Span implements ISpan {
     this.ended = true;
     this.flushToOtel();
     this.otelSpan.end();
+
+    // The run is over once its local root span ends; drop its policy evidence.
+    if (!this.parentSpanId) {
+      forgetTrace(this.context?.traceId);
+    }
   }
 
   private flushToOtel(): void {
