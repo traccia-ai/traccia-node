@@ -93,6 +93,36 @@ describe('governance pep', () => {
     });
   });
 
+  it.each([
+    ['responses', { max_output_tokens: 100 }, 'openai', 'responses', 100, { max_output_tokens: 5 }],
+    ['chat max_completion_tokens', { max_completion_tokens: 100 }, 'openai', undefined, 100, { max_completion_tokens: 5 }],
+    ['chat max_tokens', { max_tokens: 100 }, 'openai', undefined, 100, { max_tokens: 5 }],
+    ['openai chat without a cap', {}, 'openai', undefined, undefined, { max_completion_tokens: 5 }],
+    ['anthropic', { max_tokens: 100 }, 'anthropic', undefined, 100, { max_tokens: 5 }],
+    [
+      'gemini',
+      { generation_config: { max_output_tokens: 100, temperature: 0.2 } },
+      'google_gemini',
+      undefined,
+      100,
+      { generation_config: { max_output_tokens: 5, temperature: 0.2 } },
+    ],
+  ])('clamps the %s token cap', async (_name, cap, vendor, api, sentCap, clamped) => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-c', effect: 'reshape', would_have: false, obligations: { clamp_max_tokens: 5 } },
+    });
+    _setPepHttpClientForTests(client);
+
+    const kwargs: Record<string, unknown> = { model: 'm', ...cap };
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceLlmCall(kwargs, vendor, api);
+    });
+    expect((post.mock.calls[0][1] as { context: { max_tokens?: number } }).context.max_tokens).toBe(sentCap);
+    expect(kwargs).toEqual({ model: 'm', ...clamped });
+  });
+
   it('sends the vendor so Spend Cap prices the right provider', async () => {
     const client = axios.create();
     const post = jest.spyOn(client, 'post').mockResolvedValue({
