@@ -466,20 +466,45 @@ function estimateTokens(kwargs: Record<string, unknown>): number | undefined {
   return Math.max(Math.floor(blob.length / 4), 1);
 }
 
-/** Check policy before an LLM call. `vendor` is the span's llm.vendor; Spend Cap uses it to pick that provider's price. */
+/** Where this provider API takes the output-token cap: [params, key]. */
+function tokenCap(
+  kwargs: Record<string, unknown>,
+  vendor?: string,
+  api?: string,
+): [Record<string, unknown>, string] {
+  if (vendor === 'google_gemini') {
+    return [(kwargs.generation_config as Record<string, unknown>) ?? {}, 'max_output_tokens'];
+  }
+  if (api === 'responses') {
+    return [kwargs, 'max_output_tokens'];
+  }
+  if (vendor === 'anthropic') {
+    return [kwargs, 'max_tokens'];
+  }
+  const key = ['max_completion_tokens', 'max_tokens'].find((k) => kwargs[k] != null);
+  // OpenAI reasoning models reject max_tokens; every Chat model takes max_completion_tokens.
+  return [kwargs, key ?? (vendor === 'openai' ? 'max_completion_tokens' : 'max_tokens')];
+}
+
+/**
+ * Check policy before an LLM call. `vendor` is the span's llm.vendor; Spend Cap uses it to pick that provider's price.
+ * `api` is the span's llm.api ('responses' for the OpenAI Responses API); with `vendor` it picks the token-cap parameter.
+ */
 export async function enforceLlmCall(
   kwargs: Record<string, unknown>,
   vendor?: string,
+  api?: string,
 ): Promise<Record<string, unknown> | undefined> {
   if (!pepEnabled()) {
     return undefined;
   }
   const model = kwargs.model;
+  const [capParams, capKey] = tokenCap(kwargs, vendor, api);
   const span = getCurrentSpan();
   const traceId = asOtelHex(span?.context?.traceId, 32);
   const context: Record<string, unknown> = {
     model,
-    max_tokens: kwargs.max_tokens || kwargs.max_completion_tokens,
+    max_tokens: capParams[capKey],
     input_tokens: estimateTokens(kwargs),
     retrieval: retrievalContext(traceId),
   };
@@ -501,7 +526,11 @@ export async function enforceLlmCall(
       kwargs.model = cheaper;
     }
     if (obligations.clamp_max_tokens != null) {
-      kwargs.max_tokens = obligations.clamp_max_tokens;
+      if (capParams === kwargs) {
+        kwargs[capKey] = obligations.clamp_max_tokens;
+      } else {
+        kwargs.generation_config = { ...capParams, [capKey]: obligations.clamp_max_tokens };
+      }
     }
   }
   return decision;
