@@ -326,7 +326,6 @@ const lookupOrder = observe({ name: 'lookup_order', asType: 'tool' })(
 );
 
 const runAgent = govern({
-  failOpen: false,
   name: 'run_agent',
 })(async (prompt: string) => {
   await lookupOrder('ORD-1');
@@ -346,11 +345,20 @@ try {
 }
 ```
 
-Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. `failOpen: true` (default) lets the agent continue if Traccia is unreachable. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `govern()` throws `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pendingToolResult()` is a normal tool result when a framework retries raised errors.
+Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. Without an agent ID, API key or endpoint, `govern()` throws `GovernanceConfigError` (a subclass of `AgentBlockedError`) instead of running unchecked. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `govern()` throws `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pendingToolResult()` is a normal tool result when a framework retries raised errors.
 
 `observe({ asType: 'tool' })` matches Python `@observe(as_type="tool")`. `type: 'tool'` still works.
 
 For a custom tool that is **not** wrapped with `observe({ asType: 'tool' })`, call `checkPolicy({ action: { type: 'tool_call', name: 'refund' }, context: { input: { amount } } })` yourself.
+
+#### When Traccia can't be reached
+
+If a check gets no answer (timeout, connection error, 5xx, or an invalid answer), the call follows your **policy fail mode**: **Settings → Policy Enforcement** in the app, for the organization or one workspace. The default is to block: the call throws `AgentBlockedError`, and the provider or tool is never called. Choose Allow there to let calls through while Traccia is down.
+
+- The setting arrives with answers the SDK already gets: the agent status at the start of each `govern()` run (cached 60 s) and each policy check. There are no extra requests, and tracing-only code never calls Traccia for it.
+- It is kept for 10 minutes after the last answer that carried it, then the SDK goes back to blocking. A process that has had no answer yet, for example one that starts while Traccia is down, blocks. Calling `init()` again forgets it.
+- A local override applies only when there is no answer: `init({ policyFailMode: 'open' | 'closed' })` for the process, or `govern({ policyFailMode })` for one run and the checks inside it. It never overrides a rejected API key (401/403), a block, a deny or a configuration error. The SDK logs a warning once when it disagrees with your Traccia setting, since the [Traccia Gateway](https://traccia.ai/docs/platform/gateway) follows the setting.
+- `govern({ failOpen })` and `checkAgentStatus(id, { failOpen })` are deprecated: `true` means `policyFailMode: 'open'`, `false` means `'closed'`. Omit it to follow your setting.
 
 Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK guide: [Governance in the SDK](https://traccia.ai/docs/sdk/governance).
 
@@ -361,6 +369,7 @@ Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK 
 status_check_endpoint = "https://custom.example/agents/{agent_id}/status"
 post_block_endpoint = "https://custom.example/agents/{agent_id}/blocks"
 status_cache_ttl_seconds = 120
+policy_fail_mode = "closed"   # optional local override, see above
 ```
 
 ### Transparency — `disclosure()`

@@ -2,9 +2,9 @@
  * SDK policy enforcement point: check() on LLM and tool calls under govern().
  */
 
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { resolveClientCredentials } from '../config/client-config';
-import { getAgentId, getConfig, pepEnabled, pepFailOpen } from '../config/runtime-config';
+import { getAgentId, getConfig, pepEnabled } from '../config/runtime-config';
 import { getCurrentSpan } from '../context/context';
 import {
   lastReads,
@@ -14,9 +14,12 @@ import {
   retrievalByTrace,
   runKey,
 } from './evidence';
-import { AgentBlockedError, ApprovalPending } from './policy';
+import { govConfig } from './config';
+import * as failMode from './fail-mode';
+import { AgentBlockedError, ApprovalPending, GovernanceConfigError, rejectedError } from './policy';
 
 const CHECK_PATH = '/api/v1/policy/check';
+const DECISION_EFFECTS = ['allow', 'warn', 'reshape', 'queue', 'deny'];
 const SETTLE_PATH = '/api/v1/policy/settle';
 const BUDGET_TTL_MS = 5000;
 
@@ -28,6 +31,8 @@ export function _setPepHttpClientForTests(client: AxiosInstance): void {
 }
 
 export function _resetPepStateForTests(): void {
+  failMode._clearFailModeStateForTests();
+  govConfig.policyFailMode = undefined;
   remainingBudget.clear();
   lastReads.clear();
   retrievalByTrace.clear();
@@ -292,20 +297,36 @@ function blockedMessage(decision: Record<string, unknown>): string {
   return parts.join('. ');
 }
 
-/** No decision from Traccia. Allow, unless the govern() run is fail-closed. */
-function unresolved(reason: string, detail: string, warn = true): Record<string, unknown> {
-  if (!pepFailOpen()) {
+/** Accept only a decision the SDK can act on; anything else counts as no answer. */
+export function validDecision(decision: unknown): decision is Record<string, unknown> {
+  return (
+    failMode.validFields(decision) &&
+    DECISION_EFFECTS.includes(decision.effect as string) &&
+    typeof decision.would_have === 'boolean'
+  );
+}
+
+/**
+ * No decision from Traccia: apply the fail mode (TRC-342). A rejection of the key
+ * after this check was sent wins over any fail mode.
+ */
+function unresolved(ident: string, startedAt: number, reason: string, detail: string): Record<string, unknown> {
+  const rejected = failMode.rejectedSince(ident, startedAt);
+  if (rejected) {
+    throw rejectedError(rejected);
+  }
+  if (failMode.resolve(ident, failMode.localMode()) === 'closed') {
     console.error(
-      `[traccia.governance] policy check could not complete (${detail}); blocking call (failOpen: false)`,
+      `[traccia.governance] policy check could not complete (${detail}); blocking call (policy fail mode: closed)`,
     );
     throw new AgentBlockedError(
-      `Policy check could not complete (${detail}). Blocking because failOpen is false.`,
+      `Policy check could not complete (${detail}). Blocking because the policy fail mode is closed.`,
       { reasons: [reason] },
     );
   }
-  if (warn) {
-    console.warn(`[traccia.governance] policy check could not complete (${detail}); allowing call`);
-  }
+  console.warn(
+    `[traccia.governance] policy check could not complete (${detail}); allowing call (policy fail mode: open)`,
+  );
   return { effect: 'allow', would_have: false, reasons: [reason] };
 }
 
@@ -316,11 +337,13 @@ export async function checkPolicy(input: {
 }): Promise<Record<string, unknown>> {
   const { apiKey, endpoint } = resolveClientCredentials();
   if (!apiKey || !endpoint) {
-    return unresolved('missing_credentials', 'Traccia API key or endpoint not set', false);
+    throw new GovernanceConfigError(
+      'Traccia API key or endpoint not set. Policy checks need both (TRACCIA_API_KEY and TRACCIA_ENDPOINT, or init()).',
+    );
   }
   const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID;
   if (!agentId) {
-    return unresolved('missing_agent_id', 'no agentId on init, govern(), or TRACCIA_AGENT_ID', false);
+    throw new GovernanceConfigError('No agentId on init, govern(), or TRACCIA_AGENT_ID. Policy checks need one.');
   }
   const span = getCurrentSpan();
   const payload = {
@@ -336,44 +359,63 @@ export async function checkPolicy(input: {
   if (remaining !== undefined) {
     (payload.context as Record<string, unknown>).remaining_budget_usd = remaining;
   }
+  const base = deriveBaseUrl(endpoint);
+  const ident = failMode.identity(apiKey, base);
+  const startedAt = failMode.now();
+  let response: AxiosResponse<unknown>;
   try {
-    const base = deriveBaseUrl(endpoint);
-    const response = await httpClient.post(`${base}${CHECK_PATH}`, payload, {
+    response = await httpClient.post(`${base}${CHECK_PATH}`, payload, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
-    const decision = response.data as Record<string, unknown>;
-    cacheBudget(agentId, decision.remaining_budget_usd);
-    stampSpan(decision);
-    if (decision.would_have) {
-      return decision;
-    }
-    if (decision.effect === 'queue') {
-      throw new ApprovalPending(
-        'This action is waiting for approval. Do not run the tool or retry the check.',
-        {
-          approvalId: decision.approval_id as string | undefined,
-          expiresAt: decision.approval_expires_at as string | undefined,
-          decisionId: decision.id as string | undefined,
-        },
-      );
-    }
-    if (decision.effect === 'deny') {
-      throw new AgentBlockedError(blockedMessage(decision), {
-        decisionId: decision.id as string | undefined,
-        remainingBudgetUsd: decision.remaining_budget_usd as number | null,
-        reasons: (decision.reasons as string[]) || [],
-      });
-    }
-    return decision;
   } catch (error) {
-    if (error instanceof AgentBlockedError || error instanceof ApprovalPending) {
-      throw error;
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    if (status !== undefined && failMode.REJECT_STATUSES.includes(status)) {
+      failMode.noteRejection(ident, status);
+      throw rejectedError(status);
     }
-    if (axios.isAxiosError(error) && error.response) {
-      return unresolved('check_http_error', `HTTP ${error.response.status}`);
+    if (status !== undefined) {
+      return unresolved(ident, startedAt, 'check_http_error', `HTTP ${status}`);
     }
-    return unresolved('check_error', error instanceof Error ? error.message : String(error));
+    return unresolved(ident, startedAt, 'check_error', error instanceof Error ? error.message : String(error));
   }
+  if (failMode.REJECT_STATUSES.includes(response.status)) {
+    failMode.noteRejection(ident, response.status);
+    throw rejectedError(response.status);
+  }
+  if (response.status !== 200) {
+    return unresolved(ident, startedAt, 'check_http_error', `HTTP ${response.status}`);
+  }
+  const decision = response.data;
+  if (!validDecision(decision)) {
+    return unresolved(ident, startedAt, 'check_error', 'invalid decision');
+  }
+  const rejected = failMode.rejectedSince(ident, startedAt);
+  if (rejected) {
+    // The key was rejected while this check was on its way: its answer, even an
+    // allow, no longer holds.
+    throw rejectedError(rejected);
+  }
+  failMode.noteAnswer(ident, decision, startedAt);
+  cacheBudget(agentId, decision.remaining_budget_usd);
+  stampSpan(decision);
+  if (decision.would_have) {
+    return decision;
+  }
+  if (decision.effect === 'queue') {
+    throw new ApprovalPending('This action is waiting for approval. Do not run the tool or retry the check.', {
+      approvalId: decision.approval_id as string | undefined,
+      expiresAt: decision.approval_expires_at as string | undefined,
+      decisionId: decision.id as string | undefined,
+    });
+  }
+  if (decision.effect === 'deny') {
+    throw new AgentBlockedError(blockedMessage(decision), {
+      decisionId: decision.id as string | undefined,
+      remainingBudgetUsd: decision.remaining_budget_usd as number | null,
+      reasons: (decision.reasons as string[]) || [],
+    });
+  }
+  return decision;
 }
 
 export async function settlePolicy(

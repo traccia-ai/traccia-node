@@ -1,17 +1,18 @@
 import { AgentBlockedError } from '../governance/policy';
 
 jest.mock('../governance/policy', () => ({
+    ...jest.requireActual('../governance/policy'),
     checkAgentStatus: jest.fn(),
-    AgentBlockedError: jest.requireActual('../governance/policy').AgentBlockedError,
 }));
 
 jest.mock('../config/runtime-config', () => ({
     runIdentity: jest.fn((_identity: unknown, fn: () => unknown) => fn()),
     getAgentId: jest.fn(),
+    pepFailMode: jest.fn(),
 }));
 
 import { govern } from '../governance/govern';
-import { checkAgentStatus } from '../governance/policy';
+import { checkAgentStatus, GovernanceConfigError } from '../governance/policy';
 import { getAgentId, runIdentity } from '../config/runtime-config';
 
 describe('govern', () => {
@@ -76,6 +77,7 @@ describe('govern', () => {
 
     describe('default options and name resolution', () => {
         it('works with govern() called with no options at all', async () => {
+            process.env.TRACCIA_AGENT_ID = 'env-agent';
             const fn = jest.fn().mockReturnValue('ok');
             const wrapped = govern()(fn) as (...args: unknown[]) => unknown;
 
@@ -121,19 +123,19 @@ describe('govern', () => {
 
             await wrapped();
 
-            expect(mockCheckAgentStatus).toHaveBeenCalledWith('explicit-agent', { failOpen: true });
+            expect(mockCheckAgentStatus).toHaveBeenCalledWith('explicit-agent', { policyFailMode: undefined });
         });
 
         it('inherits agentId from init when govern() has no agentId', async () => {
             mockGetAgentId.mockReturnValue('from-init');
             const fn = jest.fn().mockReturnValue('ok');
-            const wrapped = govern({ failOpen: false })(fn) as (...args: unknown[]) => unknown;
+            const wrapped = govern({ policyFailMode: 'closed' })(fn) as (...args: unknown[]) => unknown;
 
             await wrapped();
 
-            expect(mockCheckAgentStatus).toHaveBeenCalledWith('from-init', { failOpen: false });
+            expect(mockCheckAgentStatus).toHaveBeenCalledWith('from-init', { policyFailMode: 'closed' });
             expect(mockRunIdentity).toHaveBeenCalledWith(
-                { pepEnabled: true, pepFailOpen: false },
+                { pepEnabled: true, pepFailMode: 'closed' },
                 expect.any(Function),
             );
         });
@@ -145,28 +147,22 @@ describe('govern', () => {
 
             await wrapped();
 
-            expect(mockCheckAgentStatus).toHaveBeenCalledWith('env-agent', { failOpen: true });
+            expect(mockCheckAgentStatus).toHaveBeenCalledWith('env-agent', { policyFailMode: undefined });
         });
 
-        it('warns and skips the policy check when init, govern, and env are empty', async () => {
-            const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        it('is a configuration error when init, govern, and env are empty (TRC-342)', async () => {
             const fn = jest.fn().mockReturnValue('ok');
-            const wrapped = govern({})(fn) as (...args: unknown[]) => unknown;
+            const wrapped = govern({ policyFailMode: 'open' })(fn) as (...args: unknown[]) => unknown;
 
-            const result = await wrapped();
-
-            expect(result).toBe('ok');
+            await expect(wrapped()).rejects.toBeInstanceOf(GovernanceConfigError);
             expect(mockCheckAgentStatus).not.toHaveBeenCalled();
-            expect(warnSpy).toHaveBeenCalledWith(
-                expect.stringContaining('No agentId on init, govern()'),
-            );
-
-            warnSpy.mockRestore();
+            expect(fn).not.toHaveBeenCalled();
         });
     });
 
-    describe('failOpen option', () => {
-        it('passes failOpen: false through to checkAgentStatus', async () => {
+    describe('failOpen option (deprecated)', () => {
+        it('passes failOpen: false through to checkAgentStatus as the closed override', async () => {
+            const emit = jest.spyOn(process, 'emitWarning').mockImplementation(() => {});
             const fn = jest.fn().mockReturnValue('ok');
             const wrapped = govern({ agentId: 'agent-1', failOpen: false })(fn) as (
                 ...args: unknown[]
@@ -174,7 +170,9 @@ describe('govern', () => {
 
             await wrapped();
 
-            expect(mockCheckAgentStatus).toHaveBeenCalledWith('agent-1', { failOpen: false });
+            expect(mockCheckAgentStatus).toHaveBeenCalledWith('agent-1', { policyFailMode: 'closed' });
+            expect(emit).toHaveBeenCalledWith(expect.stringContaining('failOpen'), 'DeprecationWarning');
+            emit.mockRestore();
         });
     });
 
@@ -200,7 +198,7 @@ describe('govern', () => {
             await wrapped();
 
             expect(mockRunIdentity).toHaveBeenCalledWith(
-                { pepEnabled: true, pepFailOpen: true, agentId: 'agent-1', agentName: 'my-agent' },
+                { pepEnabled: true, pepFailMode: undefined, agentId: 'agent-1', agentName: 'my-agent' },
                 expect.any(Function),
             );
         });
@@ -210,12 +208,13 @@ describe('govern', () => {
         it('actually traces the call via observe() when unmocked', async () => {
             jest.resetModules();
             jest.doMock('../governance/policy', () => ({
+                ...jest.requireActual('../governance/policy'),
                 checkAgentStatus: jest.fn().mockResolvedValue(undefined),
-                AgentBlockedError: jest.requireActual('../governance/policy').AgentBlockedError,
             }));
             jest.doMock('../config/runtime-config', () => ({
                 runIdentity: jest.fn((_identity: unknown, fn: () => unknown) => fn()),
                 getAgentId: jest.fn(),
+                pepFailMode: jest.fn(),
             }));
 
             const mockSpan = {
