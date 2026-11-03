@@ -5,6 +5,7 @@
 import axios from 'axios';
 import {
   AgentBlockedError,
+  GovernanceConfigError,
   checkAgentStatus,
   _resetPolicyStateForTests,
   _setHttpClientForTests,
@@ -36,7 +37,7 @@ describe('governance policy', () => {
     const post = jest.spyOn(client, 'post');
     _setHttpClientForTests(client);
 
-    await checkAgentStatus('agent-1', { failOpen: true });
+    await checkAgentStatus('agent-1', { policyFailMode: 'open' });
 
     expect(get).toHaveBeenCalledWith(
       'https://api.traccia.ai/api/v1/agents/agent-1/status',
@@ -56,25 +57,25 @@ describe('governance policy', () => {
     jest.spyOn(client, 'post').mockResolvedValue({ status: 200, data: {} });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-1', { failOpen: false })).rejects.toBeInstanceOf(
+    await expect(checkAgentStatus('agent-1', { policyFailMode: 'closed' })).rejects.toBeInstanceOf(
       AgentBlockedError,
     );
   });
 
-  it('allows execution on HTTP error when failOpen is true', async () => {
+  it('allows execution on HTTP error with the open override', async () => {
     const client = axios.create();
     jest.spyOn(client, 'get').mockRejectedValue(new Error('timeout'));
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-1', { failOpen: true })).resolves.toBeUndefined();
+    await expect(checkAgentStatus('agent-1', { policyFailMode: 'open' })).resolves.toBeUndefined();
   });
 
-  it('blocks on HTTP error when failOpen is false', async () => {
+  it('blocks on HTTP error with the closed override', async () => {
     const client = axios.create();
     jest.spyOn(client, 'get').mockRejectedValue(new Error('timeout'));
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-1', { failOpen: false })).rejects.toBeInstanceOf(
+    await expect(checkAgentStatus('agent-1', { policyFailMode: 'closed' })).rejects.toBeInstanceOf(
       AgentBlockedError,
     );
   });
@@ -87,8 +88,8 @@ describe('governance policy', () => {
     });
     _setHttpClientForTests(client);
 
-    await checkAgentStatus('agent-cache', { failOpen: true });
-    await checkAgentStatus('agent-cache', { failOpen: true });
+    await checkAgentStatus('agent-cache', { policyFailMode: 'open' });
+    await checkAgentStatus('agent-cache', { policyFailMode: 'open' });
 
     expect(get).toHaveBeenCalledTimes(1);
   });
@@ -102,7 +103,7 @@ describe('governance policy', () => {
     });
     _setHttpClientForTests(client);
 
-    await checkAgentStatus('agent-x', { failOpen: true });
+    await checkAgentStatus('agent-x', { policyFailMode: 'open' });
 
     expect(get).toHaveBeenCalledWith(
       'https://custom.example/agents/agent-x/status',
@@ -120,9 +121,9 @@ describe('governance policy', () => {
     });
     _setHttpClientForTests(client);
 
-    await checkAgentStatus('agent-ttl', { failOpen: true });
+    await checkAgentStatus('agent-ttl', { policyFailMode: 'open' });
     jest.advanceTimersByTime(1500);
-    await checkAgentStatus('agent-ttl', { failOpen: true });
+    await checkAgentStatus('agent-ttl', { policyFailMode: 'open' });
 
     expect(get).toHaveBeenCalledTimes(2);
     jest.useRealTimers();
@@ -138,7 +139,7 @@ describe('governance policy', () => {
     const post = jest.spyOn(client, 'post').mockResolvedValue({ status: 200, data: {} });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-block', { failOpen: false })).rejects.toBeInstanceOf(
+    await expect(checkAgentStatus('agent-block', { policyFailMode: 'closed' })).rejects.toBeInstanceOf(
       AgentBlockedError,
     );
 
@@ -162,14 +163,14 @@ describe('governance policy', () => {
     });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-soft', { failOpen: true })).resolves.toBeUndefined();
+    await expect(checkAgentStatus('agent-soft', { policyFailMode: 'open' })).resolves.toBeUndefined();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('SOFT BLOCKED'));
 
     warnSpy.mockRestore();
   });
 
-  it('warns and treats an unrecognized status as allowed', async () => {
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  it('treats an unrecognized status as no answer, which blocks by default (TRC-342)', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const client = axios.create();
     jest.spyOn(client, 'get').mockResolvedValue({
       status: 200,
@@ -177,10 +178,9 @@ describe('governance policy', () => {
     });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-unknown', { failOpen: true })).resolves.toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown agent status received'));
+    await expect(checkAgentStatus('agent-unknown')).rejects.toThrow('invalid status answer');
 
-    warnSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   it('warns (does not throw) when recording a block fails', async () => {
@@ -194,7 +194,7 @@ describe('governance policy', () => {
     _setHttpClientForTests(client);
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await expect(checkAgentStatus('agent-block-fail', { failOpen: false })).rejects.toBeInstanceOf(
+    await expect(checkAgentStatus('agent-block-fail', { policyFailMode: 'closed' })).rejects.toBeInstanceOf(
       AgentBlockedError,
     );
     await Promise.resolve();
@@ -207,65 +207,38 @@ describe('governance policy', () => {
     warnSpy.mockRestore();
   });
 
-  it('warns and skips the check when the config has no api_key', async () => {
-    const { loadConfig } = jest.requireMock('../config/config') as { loadConfig: jest.Mock };
-    loadConfig.mockReturnValueOnce({ tracing: { endpoint: 'https://api.traccia.ai/v2/traces' } });
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const client = axios.create();
-    const get = jest.spyOn(client, 'get');
-    _setHttpClientForTests(client);
-
-    await expect(checkAgentStatus('agent-no-key', { failOpen: true })).resolves.toBeUndefined();
-
-    expect(get).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('API key not found'));
-    warnSpy.mockRestore();
-  });
-
-  it('warns and skips the check when the config has no tracesEndpoint', async () => {
-    const { loadConfig } = jest.requireMock('../config/config') as { loadConfig: jest.Mock };
-    loadConfig.mockReturnValueOnce({ tracing: { api_key: 'test-key' } });
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const client = axios.create();
-    const get = jest.spyOn(client, 'get');
-    _setHttpClientForTests(client);
-
-    await expect(checkAgentStatus('agent-no-endpoint', { failOpen: true })).resolves.toBeUndefined();
-
-    expect(get).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('endpoint not found'));
-    warnSpy.mockRestore();
-  });
-
-  it('allows execution on a resolved non-200 response when failOpen is true', async () => {
+  it('allows execution on a resolved non-200 response with the open override', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const client = axios.create();
     jest.spyOn(client, 'get').mockResolvedValue({ status: 500, data: {} });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-500-open', { failOpen: true })).resolves.toBeUndefined();
+    await expect(checkAgentStatus('agent-500-open', { policyFailMode: 'open' })).resolves.toBeUndefined();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('HTTP 500'));
 
     warnSpy.mockRestore();
   });
 
-  it('blocks execution on a resolved non-200 response when failOpen is false', async () => {
+  it('blocks execution on a resolved non-200 response with the closed override', async () => {
     const client = axios.create();
     jest.spyOn(client, 'get').mockResolvedValue({ status: 503, data: {} });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-500-closed', { failOpen: false })).rejects.toBeInstanceOf(
+    await expect(checkAgentStatus('agent-500-closed', { policyFailMode: 'closed' })).rejects.toBeInstanceOf(
       AgentBlockedError,
     );
   });
 
-  it('defaults status to "allowed" when the response omits it, and failOpen to true when options is omitted', async () => {
+  it('treats an answer without a status as no answer (TRC-342)', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const client = axios.create();
     const get = jest.spyOn(client, 'get').mockResolvedValue({ status: 200, data: {} });
     _setHttpClientForTests(client);
 
-    await expect(checkAgentStatus('agent-default-status')).resolves.toBeUndefined();
+    await expect(checkAgentStatus('agent-default-status')).rejects.toThrow('invalid status answer');
     expect(get).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
   });
 
   it('shares one in-flight request across concurrent calls for the same uncached agent', async () => {
@@ -278,8 +251,8 @@ describe('governance policy', () => {
     );
     _setHttpClientForTests(client);
 
-    const call1 = checkAgentStatus('agent-concurrent', { failOpen: true });
-    const call2 = checkAgentStatus('agent-concurrent', { failOpen: true });
+    const call1 = checkAgentStatus('agent-concurrent', { policyFailMode: 'open' });
+    const call2 = checkAgentStatus('agent-concurrent', { policyFailMode: 'open' });
 
     resolveGet({ status: 200, data: { status: 'allowed' } });
     await Promise.all([call1, call2]);
@@ -290,18 +263,17 @@ describe('governance policy', () => {
   it.each([
     ['API key not found', { endpoint: 'https://api.traccia.ai/v2/traces' }],
     ['endpoint not found', { api_key: 'test-key' }],
-  ])('blocks when %s and failOpen is false', async (message, tracing) => {
+  ])('is a configuration error when %s, even with the open override', async (message, tracing) => {
     const { loadConfig } = jest.requireMock('../config/config') as { loadConfig: jest.Mock };
     loadConfig.mockReturnValueOnce({ tracing });
     const client = axios.create();
     const get = jest.spyOn(client, 'get');
     _setHttpClientForTests(client);
 
-    const err = await checkAgentStatus('agent-missing', { failOpen: false }).catch((e) => e);
+    const err = await checkAgentStatus('agent-missing', { policyFailMode: 'open' }).catch((e) => e);
 
-    expect(err).toBeInstanceOf(AgentBlockedError);
+    expect(err).toBeInstanceOf(GovernanceConfigError);
     expect(err.message).toContain(message);
-    expect(err.message).toContain('failOpen is false');
     expect(get).not.toHaveBeenCalled();
   });
 });

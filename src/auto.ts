@@ -95,8 +95,20 @@ export function getTracer(name: string, version?: string): ITracer {
 /**
  * Initialize tracing with automatic setup.
  */
+function applyGovernanceConfig(config: SDKConfig): void {
+  configureGovernance({
+    statusCheckEndpoint: config.statusCheckEndpoint,
+    postBlockEndpoint: config.postBlockEndpoint,
+    statusCacheTtlSeconds: config.statusCacheTtlSeconds,
+    policyFailMode: config.policyFailMode,
+  });
+}
+
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   if (runtimeState().started) {
+    // Tracing stays as it is, but policy checks start afresh (TRC-342): no
+    // remembered fail mode, and this call's policyFailMode applies.
+    applyGovernanceConfig(config);
     return getTracerProvider();
   }
 
@@ -117,11 +129,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   // Load configuration (files + env vars)
   const loadedConfig = loadConfig();
 
-  configureGovernance({
-    statusCheckEndpoint: config.statusCheckEndpoint,
-    postBlockEndpoint: config.postBlockEndpoint,
-    statusCacheTtlSeconds: config.statusCacheTtlSeconds,
-  });
+  applyGovernanceConfig(config);
 
   {
     const envTtl = process.env.TRACCIA_PROMPT_CACHE_TTL_S;

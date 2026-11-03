@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { shouldSkipHttp } from '../instrumentation/http-skip';
-import { AgentBlockedError, ApprovalPending, pendingToolResult } from '../governance/policy';
+import { AgentBlockedError, ApprovalPending, GovernanceConfigError, pendingToolResult } from '../governance/policy';
 import {
   checkPolicy,
   enforceLlmCall,
@@ -97,7 +97,7 @@ describe('governance pep', () => {
     const client = axios.create();
     const post = jest.spyOn(client, 'post').mockResolvedValue({
       status: 200,
-      data: { id: 'dec-v', effect: 'allow', obligations: {} },
+      data: { id: 'dec-v', effect: 'allow', would_have: false, obligations: {} },
     });
     _setPepHttpClientForTests(client);
 
@@ -271,15 +271,15 @@ describe('governance pep', () => {
     });
   });
 
-  it('does not treat a deny as a thrown AgentBlockedError when HTTP fails', async () => {
+  it('blocks by default when the check fails (TRC-342)', async () => {
     const client = axios.create();
     jest.spyOn(client, 'post').mockRejectedValue(new Error('timeout'));
     _setPepHttpClientForTests(client);
 
     await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
-      const out = await checkPolicy({ action: { type: 'llm_call' } });
-      expect(out.effect).toBe('allow');
-      expect(out.reasons).toEqual(['check_error']);
+      const err = await checkPolicy({ action: { type: 'llm_call' } }).catch((e) => e);
+      expect(err).toBeInstanceOf(AgentBlockedError);
+      expect(err.reasons).toEqual(['check_error']);
     });
   });
 
@@ -293,8 +293,8 @@ describe('governance pep', () => {
     _setPepHttpClientForTests(client);
 
     await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
-      const out = await checkPolicy({ action: { type: 'llm_call' } });
-      expect(out.reasons).toEqual(['check_http_error']);
+      const err = await checkPolicy({ action: { type: 'llm_call' } }).catch((e) => e);
+      expect(err.reasons).toEqual(['check_http_error']);
     });
   });
 
@@ -417,7 +417,7 @@ describe('AgentBlockedError extras', () => {
   });
 
   describe('fail-closed runs', () => {
-    const failClosed = { agentId: 'support', pepEnabled: true, pepFailOpen: false };
+    const failClosed = { agentId: 'support', pepEnabled: true, pepFailMode: 'closed' as const };
 
     it('blocks on a transport error', async () => {
       const client = axios.create();
@@ -428,7 +428,7 @@ describe('AgentBlockedError extras', () => {
         const err = await enforceLlmCall({ model: 'gpt-4o' }).catch((e) => e);
         expect(err).toBeInstanceOf(AgentBlockedError);
         expect(err.reasons).toEqual(['check_error']);
-        expect(err.message).toContain('failOpen is false');
+        expect(err.message).toContain('policy fail mode is closed');
       });
     });
 
@@ -457,8 +457,7 @@ describe('AgentBlockedError extras', () => {
       try {
         await runIdentity(failClosed, async () => {
           const err = await enforceToolCall('search', { q: 'x' }).catch((e) => e);
-          expect(err).toBeInstanceOf(AgentBlockedError);
-          expect(err.reasons).toEqual(['missing_credentials']);
+          expect(err).toBeInstanceOf(GovernanceConfigError);
         });
       } finally {
         if (saved.key !== undefined) process.env.TRACCIA_API_KEY = saved.key;

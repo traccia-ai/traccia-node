@@ -5,10 +5,17 @@
 import { observe, ObserveOptions } from '../instrumentation/decorator';
 import { getAgentId, runIdentity } from '../config/runtime-config';
 import { governedRun } from './evidence';
-import { checkAgentStatus } from './policy';
+import type { PolicyFailMode } from './fail-mode';
+import { checkAgentStatus, GovernanceConfigError, localFailMode } from './policy';
 
 export interface GovernOptions extends ObserveOptions {
   agentId?: string;
+  /**
+   * Overrides your Traccia setting for this run and the checks inside it, only when
+   * Traccia gives no answer: 'open' allows, 'closed' blocks.
+   */
+  policyFailMode?: PolicyFailMode;
+  /** @deprecated Omit to follow your Traccia setting, or use policyFailMode (true = 'open', false = 'closed'). */
   failOpen?: boolean;
 }
 
@@ -29,23 +36,24 @@ function createGovernWrapper(
   options: GovernOptions,
   defaultName: string,
 ): AnyFn {
-  const { agentId, failOpen = true, ...observeOptions } = options;
+  const { agentId, failOpen, policyFailMode, ...observeOptions } = options;
+  const local = localFailMode(failOpen, policyFailMode, 'govern');
   const observedFn = observe(observeOptions)(fn) as AnyFn;
   const agentName = observeOptions.attributes?.['agent.name'] as string | undefined;
 
   const enforceAndRun = async (thisArg: unknown, args: unknown[]) => {
     const resolvedId = resolveGovernAgentId(agentId);
-    if (resolvedId) {
-      await checkAgentStatus(resolvedId, { failOpen });
-    } else {
-      console.warn(
-        '[traccia.governance] No agentId on init, govern(), or TRACCIA_AGENT_ID. Skipping policy check.',
+    if (!resolvedId) {
+      throw new GovernanceConfigError(
+        'No agentId on init, govern(), or TRACCIA_AGENT_ID. govern() needs one to check policies; ' +
+          'use observe() for tracing only.',
       );
     }
+    await checkAgentStatus(resolvedId, { policyFailMode: local });
 
-    const identity: { pepEnabled: true; pepFailOpen: boolean; agentId?: string; agentName?: string } = {
+    const identity: { pepEnabled: true; pepFailMode?: PolicyFailMode; agentId?: string; agentName?: string } = {
       pepEnabled: true,
-      pepFailOpen: failOpen,
+      pepFailMode: local,
     };
     if (agentId?.trim()) identity.agentId = agentId.trim();
     if (agentName) identity.agentName = agentName;
@@ -72,8 +80,11 @@ function createGovernWrapper(
  * Deny throws AgentBlockedError. Reshape may swap the model on the in-flight
  * request. Observe/Warn in the dashboard still let the call proceed.
  *
- * failOpen: false blocks the run, and every checked call inside it, when Traccia
- * cannot give a decision (missing credentials, HTTP error, timeout).
+ * When Traccia gives no answer (HTTP error, timeout), the policy fail mode applies:
+ * your Traccia setting (Settings -> Policy Enforcement), else block. policyFailMode
+ * 'open' or 'closed' overrides it for this run and the checks inside it, and only
+ * then: a rejected API key, a block, a deny or a missing API key, endpoint or agent
+ * ID always stops the call. failOpen is deprecated (true = 'open', false = 'closed').
  *
  * Requires a Traccia account (API key + endpoint). Tracing-only setups should
  * use observe() instead.

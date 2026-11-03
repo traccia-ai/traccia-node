@@ -14,7 +14,8 @@ export {
 
 export { observe, ObserveOptions } from './instrumentation/decorator';
 export { govern, GovernOptions } from './governance/govern';
-export { AgentBlockedError, ApprovalPending, pendingToolResult, checkAgentStatus } from './governance/policy';
+export { AgentBlockedError, ApprovalPending, GovernanceConfigError, pendingToolResult, checkAgentStatus } from './governance/policy';
+export type { PolicyFailMode } from './governance/fail-mode';
 export { checkPolicy } from './governance/pep';
 export { disclosure, enrichGovernanceAttributes } from './governance/disclosure';
 export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './governance/disclosure';

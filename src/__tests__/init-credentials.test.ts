@@ -14,7 +14,7 @@ const CRED_ENV = ['TRACCIA_API_KEY', 'TRACCIA_ENDPOINT', 'AGENT_DASHBOARD_API_KE
 
 describe('init() credentials are the effective client config', () => {
   const saved: Record<string, string | undefined> = {};
-  const post = jest.fn().mockResolvedValue({ data: { effect: 'allow', would_have: false } });
+  const post = jest.fn().mockResolvedValue({ status: 200, data: { effect: 'allow', would_have: false } });
 
   beforeAll(async () => {
     for (const name of CRED_ENV) {
@@ -108,9 +108,9 @@ describe('client config store', () => {
 
     autoCopy!.setAgentId('agent-shared');
     expect(sdkCopy!.getAgentId()).toBe('agent-shared');
-    await sdkCopy!.runIdentity({ pepEnabled: true, pepFailOpen: false }, () => {
+    await sdkCopy!.runIdentity({ pepEnabled: true, pepFailMode: 'closed' }, () => {
       expect(autoCopy!.pepEnabled()).toBe(true);
-      expect(autoCopy!.pepFailOpen()).toBe(false);
+      expect(autoCopy!.pepFailMode()).toBe('closed');
     });
     autoCopy!.setAgentId(undefined);
   });

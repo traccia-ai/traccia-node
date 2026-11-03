@@ -156,6 +156,13 @@ export interface SDKConfig {
   postBlockEndpoint?: string;
   /** Advanced: policy status cache TTL in seconds (default 60). */
   statusCacheTtlSeconds?: number;
+  /**
+   * Overrides your Traccia setting for what govern() policy checks do when Traccia
+   * gives no answer: 'open' allows, 'closed' blocks. Default: follow the setting
+   * (Settings -> Policy Enforcement), else block. Never overrides a rejected API
+   * key, a block, a deny or a configuration error.
+   */
+  policyFailMode?: 'open' | 'closed';
   /** Client cache TTL for loadPrompt in seconds (default 60). */
   promptCacheTtlS?: number;
   /**

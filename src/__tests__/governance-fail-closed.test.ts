@@ -1,5 +1,5 @@
 /**
- * govern({ failOpen }) carries through to per-call policy checks under real observe().
+ * govern()'s fail mode carries through to per-call policy checks under real observe() (TRC-342).
  */
 
 import axios from 'axios';
@@ -36,7 +36,7 @@ function policyOutage(): void {
   _setPepHttpClientForTests(pepClient);
 }
 
-function agentWithTool(options: { failOpen?: boolean }) {
+function agentWithTool(options: { policyFailMode?: 'open' | 'closed' }) {
   const ran: number[] = [];
   const refund = observe({ asType: 'tool', name: 'refund' })(async ({ amount }: { amount: number }) => {
     ran.push(amount);
@@ -46,7 +46,7 @@ function agentWithTool(options: { failOpen?: boolean }) {
   return { run: run as () => Promise<unknown>, ran };
 }
 
-describe('govern failOpen during a policy outage', () => {
+describe('govern during a policy outage', () => {
   let warnSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
 
@@ -63,15 +63,15 @@ describe('govern failOpen during a policy outage', () => {
     errorSpy.mockRestore();
   });
 
-  it('blocks the tool call when failOpen is false', async () => {
-    const { run, ran } = agentWithTool({ failOpen: false });
+  it('blocks the tool call by default', async () => {
+    const { run, ran } = agentWithTool({});
 
     await expect(run()).rejects.toBeInstanceOf(AgentBlockedError);
     expect(ran).toEqual([]);
   });
 
-  it('allows the tool call by default', async () => {
-    const { run, ran } = agentWithTool({});
+  it('allows the tool call with the open override', async () => {
+    const { run, ran } = agentWithTool({ policyFailMode: 'open' });
 
     await expect(run()).resolves.toEqual({ refunded: 500 });
     expect(ran).toEqual([500]);

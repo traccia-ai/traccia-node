@@ -3,23 +3,31 @@
  */
 
 import { findConfigFile, loadConfig } from '../config/config';
+import { resetFailModeState, validateMode, type PolicyFailMode } from './fail-mode';
 
 export interface GovernanceConfigOptions {
   statusCheckEndpoint?: string;
   postBlockEndpoint?: string;
   statusCacheTtlSeconds?: number;
+  policyFailMode?: PolicyFailMode;
 }
 
 export interface GovernanceTomlSection {
   status_check_endpoint?: string;
   post_block_endpoint?: string;
   status_cache_ttl_seconds?: number;
+  policy_fail_mode?: PolicyFailMode;
 }
 
 class GovernanceConfig {
   statusCheckEndpoint?: string;
   postBlockEndpoint?: string;
   statusCacheTtlSeconds = 60;
+  /**
+   * Local fail mode override for this process (TRC-342): 'open', 'closed' or undefined
+   * (follow the customer's setting in Traccia). Applies only when Traccia gives no answer.
+   */
+  policyFailMode?: PolicyFailMode;
 }
 
 const GOVERNANCE_CONFIG_KEY = Symbol.for('traccia.governanceConfig');
@@ -64,4 +72,7 @@ export function configureGovernance(
   if (ttl !== undefined) {
     govConfig.statusCacheTtlSeconds = ttl;
   }
+
+  resetFailModeState(); // a new init starts without a remembered setting
+  govConfig.policyFailMode = validateMode(options.policyFailMode ?? govSection.policy_fail_mode);
 }
