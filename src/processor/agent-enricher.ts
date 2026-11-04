@@ -222,7 +222,17 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
 
             if (model && (promptTokens || completionTokens)) {
                 try {
-                    const cost = computeCost(model, promptTokens, completionTokens);
+                    // With the span's vendor and cached input, as the cost processor prices it:
+                    // a strict vendor (Groq) is never priced at another provider's rate.
+                    const vendor = attrs['llm.vendor'];
+                    const cacheRead = attrs['llm.usage.cache_read_tokens'];
+                    const cost = computeCost(
+                        model,
+                        promptTokens,
+                        completionTokens,
+                        typeof vendor === 'string' ? vendor : undefined,
+                        typeof cacheRead === 'number' ? cacheRead : 0,
+                    );
                     if (cost !== undefined && cost !== null) {
                         span.setAttribute('llm.cost.usd', cost);
                     }

@@ -14,7 +14,7 @@ Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observa
 
 ## Features
 
-- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (`@google/genai`), LangChain support.
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (`@google/genai`), Groq (`groq-sdk`), LangChain support.
 - **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically.
 - **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery.
 - **Decorator-Based**: Trace any function with the `@observe` decorator.
@@ -186,6 +186,51 @@ const response = await client.interactions.create({
 Captures `llm.model`, `llm.prompt`, `llm.completion`, `llm.previous_interaction_id` (multi-turn), and token usage read directly from the provider's `usage.total_*` fields (`total_input_tokens`, `total_output_tokens`, `total_thought_tokens`, `total_cached_tokens`, `total_tool_use_tokens`, `total_tokens`) — never synthesized from input+output, so thinking/cache/tool tokens aren't dropped.
 
 **Streaming (`stream: true`)**: the span is still created and ends with request attributes (`llm.streaming: true`), but usage/completion population is intentionally skipped — `create()` resolves with a `Stream` object almost immediately, before the model has produced output, so populating from it would record a near-zero duration and no usage data.
+
+### Groq (`groq-sdk`)
+
+`init()` patches `client.chat.completions.create` automatically when `groq-sdk` is installed (tested against `groq-sdk` `1.6.0`). Each call gets an `llm.groq.chat.completions` span with `llm.model`, `llm.prompt`, `llm.completion`, `llm.finish_reason`, and token usage.
+
+```typescript
+import { Traccia } from '@traccia/sdk';
+import Groq from 'groq-sdk';
+
+await Traccia.init();
+
+const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+const response = await client.chat.completions.create({
+  model: 'llama-3.3-70b-versatile',
+  messages: [{ role: 'user', content: 'Write a haiku about TypeScript' }],
+});
+
+// Streaming is traced too
+const stream = await client.chat.completions.create({
+  model: 'llama-3.3-70b-versatile',
+  messages: [{ role: 'user', content: 'Write a haiku about TypeScript' }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
+}
+```
+
+- `create()` still returns groq-sdk's promise surface: `.withResponse()` and `.asResponse()` work as before. Awaiting the data after `.asResponse()` still records the completion and usage. If you only call `.asResponse()`, a non-streaming call is recorded from a copy of the response (your body stays unread); a streaming one ends its span when the promise is garbage collected and is charged its full governance reservation, since its usage is never seen.
+- **Streaming (`stream: true`)**: the span stays open while the stream is read. Read to the end, it records the full completion and token usage (from `x_groq.usage`, or `usage` with `stream_options: { include_usage: true }`). A loop that stops early ends the span with the text received so far; Groq reports usage only on the last chunk, so the span records estimated token counts instead, with `llm.usage.source` set to `estimated`: the counts settlement charges, from the request and the text, reasoning and tool call arguments received (4 characters per token). The cost processor prices them like reported usage, so the span's cost is the settled cost. An abort or an error mid-stream also keeps the text received so far. `stream.controller.abort()` marks the span `aborted` and ends it right away. Governance settles what the call produced: Groq's reported usage, an estimate from the text received when no usage arrived, or the full reservation when nothing of the response was read; a call that fails or is aborted before any output releases its reservation. A stream that is never read to the end, closed, or aborted ends when garbage collected: its request is aborted, so Groq stops generating it, and it is charged its full reservation unless Groq reported usage (its span still records the estimate of what was received). An estimate is priced locally like reported usage, so a `pricingOverride` applies to it. `stopTracing()` settles calls still open (open streams, requests not yet returned) the same way, and stops the ones with a reservation (an ungoverned call's span ends, but its stream goes on until you drop it), within its time limit (`stopTracing(timeoutMs)`, 10 seconds by default), and their spans get `llm.interrupted` set to `shutdown`. The SIGTERM/SIGINT listener `init()` registers stops nothing, since your app keeps running after the signal: it waits up to 10 seconds for calls in flight to finish (they settle as usual), then settles the ones still open at their reservation without stopping them, and their later end records nothing more; a stream among them that you drop is stopped once garbage collected. It waits up to 1 second more for a policy check still pending, so that call's span is exported. A span's cost is always that of the tokens it records, which can differ from what the Spend Cap is charged: a span charged its reservation still shows the tokens observed and their cost, since how much Groq generated is unknown, and a call released for failing before any output (an HTTP 400, say) shows the cost of its estimated prompt while nothing is charged. A call whose policy check is still pending then is settled once the check decides (the request is not held back), with the credentials the check used. Iterating, `tee()`, and `toReadableStream()` are all traced. Only the reader that reads the stream ends its span: closing an iterator or cancelling a `ReadableStream` before any read leaves the stream to be read in full, and a second reader that groq-sdk refuses ("consumed stream") changes nothing.
+- Governance settlement runs as the agent that made the call, even if the stream is read later or under another `runIdentity()`.
+- **ES modules**: `groq-sdk` ships separate CommonJS and ES module builds, and `init()` patches both, so `import Groq from 'groq-sdk'` in a `"type": "module"` app is traced too. The ES module build loads asynchronously: calls made before `await init()` resolves are not traced. With auto-patching turned off (`enable_patching = false`), call `patchGroq()` and `await patchGroqEsm()` after `init()`, or wrap one client:
+
+```typescript
+import Groq from 'groq-sdk';
+import { wrapGroqChatCompletionsCreate } from '@traccia/sdk';
+
+const client = new Groq();
+
+client.chat.completions.create = wrapGroqChatCompletionsCreate(
+  client.chat.completions.create.bind(client.chat.completions),
+  client.chat.completions,
+);
+```
 
 ---
 
