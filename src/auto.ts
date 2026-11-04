@@ -38,8 +38,10 @@ import {
 import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
 import { configureGovernance } from './governance/config';
+import { drainOpenCalls, settleOpenCalls, SHUTDOWN_SETTLE_TIMEOUT_MS } from './governance/pep';
 import { configurePrompts } from './prompts';
 import { patchGemini } from './instrumentation/gemini';
+import { patchGroq, patchGroqEsm } from './instrumentation/groq';
 import { patchAxios } from './instrumentation/axios';
 import { patchOpenAI, patchOpenAIResponses } from './instrumentation/openai';
 import { patchAnthropic } from './instrumentation/anthropic';
@@ -51,6 +53,10 @@ export interface TracciaRuntime {
   started: boolean;
   taskChildCosts?: import('async_hooks').AsyncLocalStorage<Array<{ cost: number | null }>>;
   costProvider?: TracerProvider | null;
+  /** The stopTracing() in progress; calls made meanwhile return it. */
+  stopping?: Promise<void>;
+  /** Each provider's shutdown, so stopTracing() and the signal hook shut it down once. */
+  providerShutdowns?: WeakMap<TracerProvider, Promise<void>>;
 }
 
 /** One process shares this object across the CLI bundle and the public SDK. */
@@ -332,6 +338,14 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
       /* optional peer */
     }
     try {
+      patchGroq();
+      // An app that imports groq-sdk as an ES module uses a separate build, which loads
+      // asynchronously. Wait for it so calls made after init() are traced.
+      await patchGroqEsm();
+    } catch {
+      /* optional peer */
+    }
+    try {
       patchAxios();
     } catch {
       /* optional peer */
@@ -350,18 +364,63 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
 /**
  * Stop tracing and shutdown all processors.
+ *
+ * LLM calls still in flight (an open Groq stream, a request not yet returned) are settled
+ * first, and stopped when they have a governance reservation; background governance settles
+ * are awaited, all within `timeoutMs`. A call made while a stop is in progress returns that
+ * stop's promise (and its time limit).
  */
-export async function stopTracing(): Promise<void> {
-  clearClientConfig();
+export function stopTracing(timeoutMs: number = SHUTDOWN_SETTLE_TIMEOUT_MS): Promise<void> {
   const state = runtimeState();
-  if (!state.provider) {
-    return;
+  if (state.stopping === undefined) {
+    const stopping: Promise<void> = stop(state, timeoutMs).finally(() => {
+      if (state.stopping === stopping) {
+        state.stopping = undefined;
+      }
+    });
+    state.stopping = stopping;
   }
+  return state.stopping;
+}
 
-  await state.provider.shutdown();
-  state.started = false;
-  state.provider = null;
-  state.costProvider = null;
+async function stop(state: TracciaRuntime, timeoutMs: number): Promise<void> {
+  // Read once: state can change while the settles below wait.
+  const provider = state.provider;
+  try {
+    if (!provider) {
+      return;
+    }
+
+    // Settle calls still open, so their spans end before the flush below, and let background
+    // governance settles reach the server first.
+    await settleOpenCalls(timeoutMs).catch(() => undefined);
+    await shutdownProvider(provider);
+    if (state.provider === provider) {
+      state.started = false;
+      state.provider = null;
+      state.costProvider = null;
+    }
+  } finally {
+    // Only now: the settles above read the init() credentials. (A settle that starts later,
+    // after a policy check that outlived the time limit, uses the credentials of its check.)
+    clearClientConfig();
+  }
+}
+
+/** Shut `provider` down once, however many shutdowns ask; a failed one can be retried. */
+function shutdownProvider(provider: TracerProvider): Promise<void> {
+  const state = runtimeState();
+  if (!state.providerShutdowns) {
+    state.providerShutdowns = new WeakMap();
+  }
+  const shutdowns = state.providerShutdowns;
+  let done = shutdowns.get(provider);
+  if (done === undefined) {
+    done = provider.shutdown();
+    shutdowns.set(provider, done);
+    done.catch(() => shutdowns.delete(provider));
+  }
+  return done;
 }
 
 /**
@@ -372,12 +431,34 @@ function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcess
     return;
   }
 
-  const shutdown = async (): Promise<void> => {
+  let signalled: Promise<void> | undefined;
+  const drainAndShutdown = async (): Promise<void> => {
+    const state = runtimeState();
     try {
-      await provider.shutdown();
+      if (state.stopping !== undefined) {
+        // A stopTracing() in progress settles the calls and shuts the provider down.
+        await state.stopping;
+        return;
+      }
+      // The provider in use now (stopTracing() and a later init() replace the first one), read
+      // before the wait below.
+      const current = state.provider ?? provider;
+      // This listener replaces Node's default exit, so the app keeps running (often draining
+      // its own work): let calls in flight finish rather than stop them, within the time limit.
+      await drainOpenCalls();
+      await shutdownProvider(current);
     } catch {
       // Silently fail
     }
+  };
+  // SIGTERM then SIGINT (or a repeated signal) share one shutdown.
+  const shutdown = (): Promise<void> => {
+    if (signalled === undefined) {
+      signalled = drainAndShutdown().finally(() => {
+        signalled = undefined;
+      });
+    }
+    return signalled;
   };
 
   // eslint-disable-next-line @typescript-eslint/no-misused-promises

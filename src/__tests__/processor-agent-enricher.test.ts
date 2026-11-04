@@ -1,5 +1,6 @@
 import { AgentEnrichmentProcessor } from '../processor/agent-enricher';
 import { ISpan } from '../types';
+import { computeCost } from '../processor/cost-processor';
 import * as fs from 'fs';
 
 jest.mock('fs');
@@ -136,6 +137,21 @@ describe('AgentEnrichmentProcessor', () => {
 
         processor.onEnd(mockSpan);
         expect(mockSpan.setAttribute).toHaveBeenCalledWith('llm.cost.usd', 1.5);
+        expect(computeCost).toHaveBeenCalledWith('gpt-4', 100, 50, undefined, 0);
+    });
+
+    it("prices with the span's vendor and cached input, as the cost processor does", () => {
+        const processor = new AgentEnrichmentProcessor({ defaultAgentId: 'agent-1' });
+        mockSpan.attributes = {
+            'llm.vendor': 'groq',
+            'llm.model': 'gemma2-9b-it',
+            'llm.usage.prompt_tokens': 100,
+            'llm.usage.cache_read_tokens': 400,
+            'llm.usage.completion_tokens': 50
+        };
+
+        processor.onEnd(mockSpan);
+        expect(computeCost).toHaveBeenCalledWith('gemma2-9b-it', 100, 50, 'groq', 400);
     });
 
     it('infers span type LLM or TOOL', () => {
