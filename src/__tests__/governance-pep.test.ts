@@ -7,12 +7,18 @@ import {
   enforceToolCall,
   noteRetrievalAttributes,
   rememberToolResult,
+  reservedUsd,
+  estimateTokens,
+  IMAGE_PROMPT_CHARS,
+  trackPendingSettle,
+  flushPendingSettles,
   settlePolicy,
   _asOtelHexForTests,
   _setPepHttpClientForTests,
   _resetPepStateForTests,
 } from '../governance/pep';
 import { runIdentity } from '../config/runtime-config';
+import { clearClientConfig, setClientConfig } from '../config/client-config';
 import * as spanContext from '../context/context';
 
 jest.mock('../config/config', () => ({
@@ -99,6 +105,9 @@ describe('governance pep', () => {
     ['chat max_tokens', { max_tokens: 100 }, 'openai', undefined, 100, { max_tokens: 5 }],
     ['openai chat without a cap', {}, 'openai', undefined, undefined, { max_completion_tokens: 5 }],
     ['anthropic', { max_tokens: 100 }, 'anthropic', undefined, 100, { max_tokens: 5 }],
+    ['groq max_completion_tokens', { max_completion_tokens: 100 }, 'groq', undefined, 100, { max_completion_tokens: 5 }],
+    ['groq max_tokens', { max_tokens: 100 }, 'groq', undefined, 100, { max_tokens: 5 }],
+    ['groq without a cap', {}, 'groq', undefined, undefined, { max_tokens: 5 }],
     [
       'gemini',
       { generation_config: { max_output_tokens: 100, temperature: 0.2 } },
@@ -353,6 +362,128 @@ describe('governance pep', () => {
     expect(post.mock.calls[0][1]).toHaveProperty('trace_id');
   });
 
+  it('settles a decision with the credentials and agent its check used', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-r', effect: 'allow', would_have: false, obligations: { reserved_usd: 0.25 } },
+    });
+    _setPepHttpClientForTests(client);
+    setClientConfig('init-key', 'http://127.0.0.1:9/v1/traces');
+    try {
+      const decision = await runIdentity({ agentId: 'support', pepEnabled: true }, () =>
+        checkPolicy({ action: { type: 'llm_call', model: 'gpt-4o' } }),
+      );
+      // stopTracing() cleared the init() credentials; another agent is current.
+      clearClientConfig();
+      await runIdentity({ agentId: 'other' }, () => settlePolicy(decision, { actualUsd: 0.1 }));
+    } finally {
+      clearClientConfig();
+    }
+    expect(post).toHaveBeenCalledTimes(2);
+    const [url, body, options] = post.mock.calls[1] as [string, Record<string, unknown>, { headers: Record<string, string> }];
+    expect(url).toBe('http://127.0.0.1:9/api/v1/policy/settle');
+    expect(body).toMatchObject({ agent_id: 'support', reserved_usd: 0.25, actual_usd: 0.1 });
+    expect(options.headers.Authorization).toBe('Bearer init-key');
+  });
+
+  it('still settles a decision it did not check with the current credentials', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({ status: 200, data: {} });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support' }, () => settlePolicy({ obligations: { reserved_usd: 0.25 } }));
+    expect(post.mock.calls[0][0]).toBe('https://app.traccia.ai/api/v1/policy/settle');
+    expect((post.mock.calls[0][2] as { headers: Record<string, string> }).headers.Authorization).toBe('Bearer test-key');
+  });
+
+  it('sends model, vendor and token counts on settle for the server to price', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({ status: 200, data: {} });
+    _setPepHttpClientForTests(client);
+
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await settlePolicy(
+        { obligations: { reserved_usd: 0.25 } },
+        { model: 'llama-3.3-70b-versatile', vendor: 'groq', inputTokens: 11, outputTokens: 5 },
+      );
+    });
+    expect(post.mock.calls[0][1]).toMatchObject({
+      reserved_usd: 0.25,
+      release: false,
+      model: 'llama-3.3-70b-versatile',
+      vendor: 'groq',
+      input_tokens: 11,
+      output_tokens: 5,
+    });
+    expect(post.mock.calls[0][1]).toHaveProperty('actual_usd', undefined);
+  });
+
+  describe('estimateTokens', () => {
+    it('counts string content as before', () => {
+      // 'Be brief.' + newline + 'Capital of France?' is 28 characters.
+      expect(
+        estimateTokens({
+          messages: [
+            { role: 'system', content: 'Be brief.' },
+            { role: 'user', content: 'Capital of France?' },
+          ],
+        })
+      ).toBe(7);
+      expect(estimateTokens({ prompt: 'x'.repeat(40) })).toBe(10);
+      expect(estimateTokens({ messages: [{ role: 'user', content: null }] })).toBeUndefined();
+    });
+
+    it('counts the text of content parts, not "[object Object]"', () => {
+      const text = 'x'.repeat(40000);
+      expect(estimateTokens({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] })).toBe(10000);
+    });
+
+    it('counts each image part at a fixed allowance, whatever its URL size', () => {
+      const content = [
+        { type: 'text', text: 'What is in these images?' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'A'.repeat(500000) } },
+        { type: 'image_url', image_url: { url: 'https://example.com/b.png' } },
+      ];
+      expect(estimateTokens({ messages: [{ role: 'user', content }] })).toBe(
+        Math.floor((24 + 2 * IMAGE_PROMPT_CHARS) / 4)
+      );
+    });
+
+    it('counts tool call arguments sent back in the conversation', () => {
+      const args = 'y'.repeat(400);
+      expect(
+        estimateTokens({
+          messages: [{ role: 'assistant', content: null, tool_calls: [{ function: { name: 'f', arguments: args } }] }],
+        })
+      ).toBe(100);
+    });
+  });
+
+  it('flushPendingSettles waits for background settles, and returns at once with none', async () => {
+    await expect(flushPendingSettles()).resolves.toBeUndefined();
+    let finish: () => void = () => undefined;
+    trackPendingSettle(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      })
+    );
+    let flushed = false;
+    const flushing = flushPendingSettles().then(() => {
+      flushed = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(flushed).toBe(false);
+    finish();
+    await flushing;
+    expect(flushed).toBe(true);
+  });
+
+  it('reports the reserved amount of a decision', () => {
+    expect(reservedUsd({ obligations: { reserved_usd: 0.25 } })).toBe(0.25);
+    expect(reservedUsd({ obligations: {} })).toBeUndefined();
+    expect(reservedUsd(undefined)).toBeUndefined();
+  });
+
   it('sends the last read timestamp and customer id on a write check', async () => {
     jest.spyOn(spanContext, 'getCurrentSpan').mockReturnValue({
       context: { traceId: 'run-1', spanId: 'span-1', traceFlags: 1 },
@@ -411,6 +542,22 @@ describe('governance pep', () => {
     });
     expect(body.context.retrieval.present).toBe(true);
     expect(body.context.retrieval.chunk_count).toBe(4);
+  });
+
+  it('sends the vendor on the LLM check only when given', async () => {
+    const client = axios.create();
+    const post = jest.spyOn(client, 'post').mockResolvedValue({
+      status: 200,
+      data: { id: 'dec-vendor', effect: 'allow', would_have: false, reasons: [] },
+    });
+    _setPepHttpClientForTests(client);
+    await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+      await enforceLlmCall({ model: 'llama-3.3-70b-versatile' }, 'groq');
+      await enforceLlmCall({ model: 'gpt-4o-mini' });
+    });
+    const contexts = post.mock.calls.map((call) => (call[1] as { context: Record<string, unknown> }).context);
+    expect(contexts[0].vendor).toBe('groq');
+    expect(contexts[1]).not.toHaveProperty('vendor');
   });
 
   it('omits prompt fields and does not invent a chunk count', async () => {
