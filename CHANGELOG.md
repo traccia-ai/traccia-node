@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 - A policy `clamp_max_tokens` now sets the token cap the provider API takes: `max_output_tokens` for OpenAI Responses and in Gemini's `generation_config`, `max_completion_tokens` or `max_tokens` (whichever the request used) for OpenAI Chat, `max_tokens` for Anthropic. It used to always add `max_tokens`, which Responses and Gemini reject and which left an existing cap untouched. The policy check also sees that cap. Chat requests without a cap get `max_completion_tokens`, since OpenAI reasoning models reject `max_tokens`
+- `forceFlush()` and `shutdown()` wait for a span export that is already running (TRC-279). Before, if the background timer had taken the last spans off the queue and was still sending them, `forceFlush()` returned at once and `shutdown()` could close the exporter before that export finished, so those spans could be lost on exit. `forceFlush(timeout)` now also returns at the deadline when an export hangs, instead of waiting for it
 
 ## [0.1.20] - 2026-11-03
 
