@@ -31,9 +31,19 @@ export function setCachedPricing(pricing: PricingTable): void {
 export function computeCost(
   model: string,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0,
+  vendor?: string,
 ): number | undefined {
-  return getResolver().compute(model, promptTokens, completionTokens);
+  return getResolver().compute(
+    model,
+    promptTokens,
+    completionTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    vendor,
+  );
 }
 
 function checkAndLogStaleness(generatedAt: string, ageDays: number | undefined): void {

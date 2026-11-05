@@ -12,6 +12,9 @@
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
 import { enforceLlmCall, finishLlmCall } from '../governance/pep';
+import { recordLlmMetrics } from '../metrics/recorder';
+import { getAgentId, getAgentName, getEnv } from '../config/runtime-config';
+import { computeCost } from '../processor/cost-processor';
 
 let _patched = false;
 
@@ -289,6 +292,22 @@ export function wrapGeminiInteractionsCreate<T>(
             attributes['llm.streaming'] = true;
         }
 
+        const callingAgentId = getAgentId();
+        const callingAgentName = getAgentName();
+        const callingEnv = getEnv();
+        if (callingAgentId) {
+            attributes['agent.id'] = callingAgentId;
+            attributes['agent_id'] = callingAgentId;
+        }
+        if (callingAgentName) {
+            attributes['agent.name'] = callingAgentName;
+        }
+        if (callingEnv) {
+            attributes['environment'] = callingEnv;
+            attributes['env'] = callingEnv;
+        }
+
+        const startTime = Date.now();
         return tracer.startActiveSpan('llm.gemini.interaction', async (span: ISpan) => {
             for (const [key, value] of Object.entries(attributes)) {
                 span.setAttribute(key, value);
@@ -301,6 +320,43 @@ export function wrapGeminiInteractionsCreate<T>(
 
                 if (!streaming) {
                     populateSpanFromResponse(span, response, model);
+                    try {
+                        const attrs = span.attributes || {};
+                        const promptTokens = (attrs['llm.usage.prompt_tokens'] ?? attrs['llm.usage.input_tokens']) as number | undefined;
+                        const completionTokens = (attrs['llm.usage.completion_tokens'] ?? attrs['llm.usage.output_tokens']) as number | undefined;
+                        const cacheReadTokens = (attrs['llm.usage.cached_tokens'] ?? attrs['llm.usage.cache_read_tokens']) as number | undefined;
+
+                        let cost = (attrs['llm.cost.usd'] ?? attrs['cost_usd'] ?? attrs['llm.cost']) as number | undefined;
+                        if (cost === undefined && model && (promptTokens !== undefined || completionTokens !== undefined)) {
+                            cost = computeCost(
+                                model,
+                                promptTokens || 0,
+                                completionTokens || 0,
+                                cacheReadTokens || 0,
+                                0,
+                                'google_gemini',
+                            );
+                            if (cost !== undefined) {
+                                span.setAttribute('llm.cost.usd', cost);
+                                span.setAttribute('cost_usd', cost);
+                            }
+                        }
+
+                        recordLlmMetrics({
+                            vendor: 'google_gemini',
+                            model,
+                            promptTokens,
+                            completionTokens,
+                            cacheReadTokens,
+                            duration: Math.max(0.001, (Date.now() - startTime) / 1000),
+                            cost,
+                            agentId: (attrs['agent.id'] ?? attrs['agent_id']) as string | undefined,
+                            agentName: attrs['agent.name'] as string | undefined,
+                            environment: (attrs['environment'] ?? attrs['env']) as string | undefined,
+                        });
+                    } catch {
+                        // Ignore
+                    }
                 }
                 // Streaming: `response` is a Stream object, not a completed
                 // Interaction — usage/output/model aren't available yet, so
@@ -315,6 +371,20 @@ export function wrapGeminiInteractionsCreate<T>(
                     span.recordException(error);
                     span.status = SpanStatus.ERROR;
                     span.statusDescription = error.message;
+                }
+                try {
+                    const attrs = span.attributes || {};
+                    recordLlmMetrics({
+                        vendor: 'google_gemini',
+                        model,
+                        duration: (Date.now() - startTime) / 1000,
+                        error: true,
+                        agentId: (attrs['agent.id'] ?? attrs['agent_id']) as string | undefined,
+                        agentName: attrs['agent.name'] as string | undefined,
+                        environment: (attrs['environment'] ?? attrs['env']) as string | undefined,
+                    });
+                } catch {
+                    // Ignore
                 }
                 throw error;
             } finally {

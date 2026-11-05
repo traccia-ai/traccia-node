@@ -4,6 +4,8 @@
 
 import { GuardrailCategory, SourceType, Confidence, EnforcementMode, createGuardrailFinding } from "../../guardrails/schema";
 import { ATTR_GUARDRAIL_SOURCE_SDK, ATTR_GUARDRAIL_EVIDENCE_TYPE } from "../../guardrails/constants";
+import { recordLlmMetrics } from "../../metrics/recorder";
+import { getAgentId, getAgentName, getEnv } from "../../config/runtime-config";
 
 interface AgentsSpan {
   spanData: {
@@ -65,6 +67,20 @@ export class TracciaAgentsTracingProcessor {
 
     // Extract attributes
     const attributes = this.extractAttributes(spanData);
+    const aid = getAgentId();
+    const aname = getAgentName();
+    const env = getEnv();
+    if (aid) {
+      attributes['agent.id'] = aid;
+      attributes['agent_id'] = aid;
+    }
+    if (aname) {
+      attributes['agent.name'] = aname;
+    }
+    if (env) {
+      attributes['environment'] = env;
+      attributes['env'] = env;
+    }
 
     // Start Traccia span
     // Using any to avoid tight coupling with types
@@ -76,13 +92,31 @@ export class TracciaAgentsTracingProcessor {
     const entry = this.spanMap.get(span.spanId);
     if (!entry) return;
 
-    const tracciaSpan = entry.span as { setAttribute: (k: string, v: unknown) => void; end: () => void };
+    const tracciaSpan = entry.span as { attributes?: Record<string, unknown>; setAttribute: (k: string, v: unknown) => void; end: () => void };
     this.spanMap.delete(span.spanId);
 
     const spanData = span.spanData;
 
     // Update attributes with final data
     this.updateSpanAttributes(tracciaSpan, spanData);
+
+    if (spanData.type === 'generation') {
+      const usage = spanData.usage;
+      const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens;
+      const outputTokens = usage?.output_tokens ?? usage?.completion_tokens;
+      const attrs = tracciaSpan.attributes || {};
+      recordLlmMetrics({
+        vendor: 'openai',
+        model: spanData.model,
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        duration: (Date.now() - entry.startTime) / 1000,
+        error: !span.error,
+        agentId: (attrs['agent.id'] ?? attrs['agent_id']) as string | undefined,
+        agentName: attrs['agent.name'] as string | undefined,
+        environment: (attrs['environment'] ?? attrs['env']) as string | undefined,
+      });
+    }
 
     // Record error if present
     if (span.error) {
@@ -192,6 +226,7 @@ export class TracciaAgentsTracingProcessor {
           tracciaSpan.setAttribute("llm.usage.total_tokens", inputTokens + outputTokens);
         }
       }
+
       if (spanData.input) {
         try {
           tracciaSpan.setAttribute("llm.input", JSON.stringify(spanData.input).slice(0, 1000));
