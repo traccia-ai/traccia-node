@@ -43,6 +43,12 @@ import { patchGemini } from './instrumentation/gemini';
 import { patchAxios } from './instrumentation/axios';
 import { patchOpenAI, patchOpenAIResponses } from './instrumentation/openai';
 import { patchAnthropic } from './instrumentation/anthropic';
+import { metrics as otelMetrics } from '@opentelemetry/api';
+import { MeterProvider, PeriodicExportingMetricReader, AggregationTemporality, MetricReader, PushMetricExporter } from '@opentelemetry/sdk-metrics';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
+import { StandardMetrics } from './metrics/meter';
+import { MetricsRecorder, setGlobalRecorder } from './metrics/recorder';
 
 const RUNTIME_KEY = Symbol.for('traccia.runtime');
 
@@ -51,13 +57,14 @@ export interface TracciaRuntime {
   started: boolean;
   taskChildCosts?: import('async_hooks').AsyncLocalStorage<Array<{ cost: number | null }>>;
   costProvider?: TracerProvider | null;
+  meterProvider?: MeterProvider | null;
 }
 
 /** One process shares this object across the CLI bundle and the public SDK. */
 export function runtimeState(): TracciaRuntime {
   const host = globalThis as typeof globalThis & { [RUNTIME_KEY]?: TracciaRuntime };
   if (!host[RUNTIME_KEY]) {
-    host[RUNTIME_KEY] = { provider: null, started: false };
+    host[RUNTIME_KEY] = { provider: null, started: false, meterProvider: null };
   }
   return host[RUNTIME_KEY];
 }
@@ -102,6 +109,74 @@ function applyGovernanceConfig(config: SDKConfig): void {
     statusCacheTtlSeconds: config.statusCacheTtlSeconds,
     policyFailMode: config.policyFailMode,
   });
+}
+
+
+function initializeMetrics(
+  config: SDKConfig,
+  loadedConfig: ReturnType<typeof loadConfig>,
+  endpoint: string,
+  apiKey: string,
+  resourceAttributes: Record<string, unknown>,
+): void {
+  try {
+    const enableMetrics = config.enableMetrics ?? loadedConfig.metrics?.enable_metrics ?? true;
+    if (!enableMetrics) {
+      return;
+    }
+
+    let metricsEndpoint = config.metricsEndpoint || loadedConfig.metrics?.metrics_endpoint || process.env.TRACCIA_METRICS_ENDPOINT;
+    if (!metricsEndpoint) {
+      if (endpoint.endsWith('/v1/traces')) {
+        metricsEndpoint = endpoint.replace('/v1/traces', '/v2/metrics');
+      } else if (endpoint.endsWith('/v2/traces')) {
+        metricsEndpoint = endpoint.replace('/v2/traces', '/v2/metrics');
+      } else {
+        metricsEndpoint = endpoint.replace(/\/+$/, '') + '/v2/metrics';
+      }
+    }
+
+    const sampleRateVal = config.metricsSampleRate ?? loadedConfig.metrics?.metrics_sample_rate ?? 1.0;
+    const metricsSampleRate = Number.isFinite(sampleRateVal) ? Math.min(1, Math.max(0, sampleRateVal)) : 1.0;
+
+    let metricReader = config.metricReader as MetricReader | undefined;
+    if (!metricReader) {
+      let metricExporter = config.metricExporter as PushMetricExporter | undefined;
+      if (!metricExporter) {
+        const headers: Record<string, string> = {};
+        if (apiKey) {
+          headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+        metricExporter = new OTLPMetricExporter({
+          url: metricsEndpoint,
+          headers,
+          temporalityPreference: AggregationTemporality.DELTA,
+        });
+      }
+      metricReader = new PeriodicExportingMetricReader({
+        exporter: metricExporter,
+        exportIntervalMillis: 5000,
+      });
+    }
+
+    const meterProvider = new MeterProvider({
+      resource: resourceFromAttributes(resourceAttributes as Parameters<typeof resourceFromAttributes>[0]),
+      readers: [metricReader],
+    });
+
+    otelMetrics.setGlobalMeterProvider(meterProvider);
+    runtimeState().meterProvider = meterProvider;
+
+    const meter = meterProvider.getMeter('traccia', '1.0.0');
+    const standardMetrics = StandardMetrics.createStandardMetrics(meter);
+    const recorder = new MetricsRecorder(standardMetrics, metricsSampleRate);
+    recorder.setMeter(meter);
+    setGlobalRecorder(recorder);
+  } catch (err) {
+    if (config.debug ?? loadedConfig.logging?.debug) {
+      console.warn('Failed to initialize Traccia metrics:', err);
+    }
+  }
 }
 
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
@@ -225,6 +300,8 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   // traceFlags 0 and every export processor drops them.
   // A non-numeric env value parses to NaN, which OTel treats as 0 (drop
   // everything); fall back to the default instead, like the Python SDK.
+  initializeMetrics(config, loadedConfig, endpoint, apiKey, resourceAttributes);
+
   const safeSampleRate = Number.isFinite(sampleRate) ? sampleRate : 1.0;
   const sampler = new Sampler(Math.min(1, Math.max(0, safeSampleRate)));
   provider.setSampler(sampler);
@@ -351,9 +428,37 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 /**
  * Stop tracing and shutdown all processors.
  */
+export async function forceFlush(timeout?: number): Promise<void> {
+  const state = runtimeState();
+  if (state.provider) {
+    try {
+      await state.provider.forceFlush(timeout);
+    } catch {
+      // Ignore
+    }
+  }
+  if (state.meterProvider && typeof state.meterProvider.forceFlush === 'function') {
+    try {
+      await state.meterProvider.forceFlush({ timeoutMillis: timeout });
+    } catch {
+      // Ignore
+    }
+  }
+}
+
 export async function stopTracing(): Promise<void> {
   clearClientConfig();
   const state = runtimeState();
+  if (state.meterProvider && typeof state.meterProvider.shutdown === 'function') {
+    try {
+      await state.meterProvider.shutdown();
+    } catch {
+      // Ignore
+    }
+    state.meterProvider = null;
+  }
+  otelMetrics.disable();
+  setGlobalRecorder(null);
   if (!state.provider) {
     return;
   }
@@ -374,6 +479,11 @@ function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcess
 
   const shutdown = async (): Promise<void> => {
     try {
+      const state = runtimeState();
+      if (state.meterProvider && typeof state.meterProvider.forceFlush === 'function') {
+        await state.meterProvider.forceFlush({ timeoutMillis: 5000 }).catch(() => undefined);
+        await state.meterProvider.shutdown().catch(() => undefined);
+      }
       await provider.shutdown();
     } catch {
       // Silently fail

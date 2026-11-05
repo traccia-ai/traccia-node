@@ -4,6 +4,7 @@
 
 import { GuardrailCategory, SourceType, Confidence, EnforcementMode, createGuardrailFinding } from "../../guardrails/schema";
 import { ATTR_GUARDRAIL_SOURCE_SDK, ATTR_GUARDRAIL_EVIDENCE_TYPE } from "../../guardrails/constants";
+import { recordLlmMetrics } from "../../metrics/recorder";
 
 interface AgentsSpan {
   spanData: {
@@ -83,6 +84,20 @@ export class TracciaAgentsTracingProcessor {
 
     // Update attributes with final data
     this.updateSpanAttributes(tracciaSpan, spanData);
+
+    if (spanData.type === 'generation') {
+      const usage = spanData.usage;
+      const inputTokens = usage?.input_tokens ?? usage?.prompt_tokens;
+      const outputTokens = usage?.output_tokens ?? usage?.completion_tokens;
+      recordLlmMetrics({
+        vendor: 'openai',
+        model: spanData.model,
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        duration: (Date.now() - entry.startTime) / 1000,
+        error: !!span.error,
+      });
+    }
 
     // Record error if present
     if (span.error) {
@@ -192,6 +207,7 @@ export class TracciaAgentsTracingProcessor {
           tracciaSpan.setAttribute("llm.usage.total_tokens", inputTokens + outputTokens);
         }
       }
+
       if (spanData.input) {
         try {
           tracciaSpan.setAttribute("llm.input", JSON.stringify(spanData.input).slice(0, 1000));

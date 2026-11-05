@@ -9,6 +9,7 @@ export {
   init,
   startTracing,
   stopTracing,
+  forceFlush,
   runWithAutoTrace,
 } from './auto';
 
@@ -172,7 +173,9 @@ export {
   getMetricsRecorder,
   recordCounter,
   recordHistogram,
+  recordLlmMetrics,
 } from './metrics';
+export type { RecordLlmMetricsOptions } from './metrics';
 
 // Instrumentation
 export {

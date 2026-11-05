@@ -15,6 +15,7 @@ import type { ChainValues } from "@langchain/core/utils/types";
 import { getTracer } from '../auto';
 import { ISpan } from '../types';
 import { getCurrentSpan } from "../context/context";
+import { recordLlmMetrics } from "../metrics/recorder";
 
 type LangfusePrompt = {
   name: string;
@@ -198,6 +199,11 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
           level: "ERROR",
           statusMessage: err.toString() + azureRefusalError,
         },
+      });
+
+      recordLlmMetrics({
+        vendor: 'langchain',
+        error: true,
       });
     } catch (e) {
       console.debug(e instanceof Error ? e.message : String(e));
@@ -579,6 +585,16 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
               : undefined,
           usageDetails: usageDetails,
         },
+      });
+
+      recordLlmMetrics({
+        vendor: 'langchain',
+        model: modelName,
+        promptTokens: usageDetails?.input,
+        completionTokens: usageDetails?.output,
+        duration: runId in this.completionStartTimes
+          ? (Date.now() - this.completionStartTimes[runId].getTime()) / 1000
+          : undefined,
       });
 
       if (runId in this.completionStartTimes) {
