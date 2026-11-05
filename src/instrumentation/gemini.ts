@@ -12,6 +12,7 @@
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
 import { enforceLlmCall, finishLlmCall } from '../governance/pep';
+import { recordLlmMetrics } from '../metrics/recorder';
 
 let _patched = false;
 
@@ -289,6 +290,7 @@ export function wrapGeminiInteractionsCreate<T>(
             attributes['llm.streaming'] = true;
         }
 
+        const startTime = Date.now();
         return tracer.startActiveSpan('llm.gemini.interaction', async (span: ISpan) => {
             for (const [key, value] of Object.entries(attributes)) {
                 span.setAttribute(key, value);
@@ -301,6 +303,20 @@ export function wrapGeminiInteractionsCreate<T>(
 
                 if (!streaming) {
                     populateSpanFromResponse(span, response, model);
+                    try {
+                        const attrs = span.attributes || {};
+                        const promptTokens = (attrs['llm.usage.prompt_tokens'] ?? attrs['llm.usage.input_tokens']) as number | undefined;
+                        const completionTokens = (attrs['llm.usage.completion_tokens'] ?? attrs['llm.usage.output_tokens']) as number | undefined;
+                        recordLlmMetrics({
+                            vendor: 'google_gemini',
+                            model,
+                            promptTokens,
+                            completionTokens,
+                            duration: Math.max(0.001, (Date.now() - startTime) / 1000),
+                        });
+                    } catch {
+                        // Ignore
+                    }
                 }
                 // Streaming: `response` is a Stream object, not a completed
                 // Interaction — usage/output/model aren't available yet, so
@@ -315,6 +331,16 @@ export function wrapGeminiInteractionsCreate<T>(
                     span.recordException(error);
                     span.status = SpanStatus.ERROR;
                     span.statusDescription = error.message;
+                }
+                try {
+                    recordLlmMetrics({
+                        vendor: 'google_gemini',
+                        model,
+                        duration: (Date.now() - startTime) / 1000,
+                        error: true,
+                    });
+                } catch {
+                    // Ignore
                 }
                 throw error;
             } finally {

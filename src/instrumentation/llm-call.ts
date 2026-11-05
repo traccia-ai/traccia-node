@@ -20,6 +20,7 @@ import { getTracer } from '../auto';
 import { runWithSpanAsync } from '../context/context';
 import { SpanStatus, ISpan } from '../types';
 import { enforceLlmCall, finishLlmCall } from '../governance/pep';
+import { recordLlmMetrics } from '../metrics/recorder';
 
 export interface ProviderCallHooks<S> {
     tracerName: string;
@@ -243,6 +244,26 @@ class LazyProviderPromise<T> extends Promise<T> implements ProviderPromise<T> {
 /**
  * Run a provider `create` call inside a traced, governance-enforced span.
  */
+
+function recordSpanMetrics(span: ISpan, durationSeconds: number): void {
+    safely(() => {
+        const attrs = span.attributes || {};
+        const vendor = String(attrs['llm.vendor'] || 'llm');
+        const model = attrs['llm.model'] as string | undefined;
+        const promptTokens = (attrs['llm.usage.prompt_tokens'] ?? attrs['llm.usage.input_tokens']) as number | undefined;
+        const completionTokens = (attrs['llm.usage.completion_tokens'] ?? attrs['llm.usage.output_tokens']) as number | undefined;
+        const cost = attrs['llm.cost'] as number | undefined;
+        recordLlmMetrics({
+            vendor,
+            model,
+            promptTokens,
+            completionTokens,
+            duration: durationSeconds > 0 ? durationSeconds : 0.001,
+            cost,
+        });
+    });
+}
+
 export function tracedProviderCall<S>(
     createFn: (...args: unknown[]) => unknown,
     thisArg: unknown,
@@ -252,6 +273,7 @@ export function tracedProviderCall<S>(
     const tracer = getTracer(hooks.tracerName);
     const kwargs = (args[0] || {}) as Record<string, unknown>;
     const span = tracer.startSpan(hooks.spanName);
+    const startTime = Date.now();
     for (const [key, value] of Object.entries(hooks.attributes)) {
         span.setAttribute(key, value);
     }
@@ -268,6 +290,15 @@ export function tracedProviderCall<S>(
             isFinalized = true;
             if (error !== undefined) {
                 recordError(span, error);
+                safely(() => {
+                    const attrs = span.attributes || {};
+                    recordLlmMetrics({
+                        vendor: String(hooks.attributes['llm.vendor'] || 'llm'),
+                        model: (attrs['llm.model'] || kwargs.model) as string | undefined,
+                        duration: (Date.now() - startTime) / 1000,
+                        error: true,
+                    });
+                });
             }
             finalized = inAuthScope(() =>
                 finishLlmCall(decision, error === undefined ? undefined : { release: true })
@@ -311,6 +342,7 @@ export function tracedProviderCall<S>(
                         (error) => {
                             if (error === undefined && !isFinalized) {
                                 safely(() => hooks.onStreamEnd(span, state));
+                                recordSpanMetrics(span, (Date.now() - startTime) / 1000);
                             }
                             void finalize(error);
                         }
@@ -319,6 +351,7 @@ export function tracedProviderCall<S>(
                 }
 
                 safely(() => hooks.onResponse(span, result.data));
+                recordSpanMetrics(span, (Date.now() - startTime) / 1000);
                 await finalize();
                 return result;
             } catch (error) {

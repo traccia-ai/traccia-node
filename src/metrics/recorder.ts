@@ -1,4 +1,6 @@
 import { Meter, Histogram, Counter } from "@opentelemetry/api";
+import { getAgentId, getAgentName, getEnv } from '../config/runtime-config';
+import { computeCost } from '../processor/cost-processor';
 
 export class MetricsRecorder {
   private metrics: Record<string, Histogram | Counter>;
@@ -114,19 +116,33 @@ export class MetricsRecorder {
   }
 }
 
-let globalRecorder: MetricsRecorder | null = null;
+const RUNTIME_KEY = Symbol.for('traccia.runtime');
 
-export function setGlobalRecorder(recorder: MetricsRecorder): void {
-  globalRecorder = recorder;
+interface MetricsRuntimeState {
+  metricsRecorder?: MetricsRecorder | null;
+}
+
+/** One process shares the recorder across separately bundled SDK entry points. */
+function recorderRuntimeState(): MetricsRuntimeState {
+  const host = globalThis as typeof globalThis & { [RUNTIME_KEY]?: MetricsRuntimeState };
+  if (!host[RUNTIME_KEY]) {
+    host[RUNTIME_KEY] = {};
+  }
+  return host[RUNTIME_KEY];
+}
+
+export function setGlobalRecorder(recorder: MetricsRecorder | null): void {
+  recorderRuntimeState().metricsRecorder = recorder;
 }
 
 export function getMetricsRecorder(): MetricsRecorder | null {
-  return globalRecorder;
+  return recorderRuntimeState().metricsRecorder ?? null;
 }
 
 export function recordCounter(name: string, value: number = 1, attributes?: { [key: string]: string | number | boolean }): void {
-  if (!globalRecorder) return;
-  globalRecorder.recordCounter(name, value, attributes);
+  const recorder = getMetricsRecorder();
+  if (!recorder) return;
+  recorder.recordCounter(name, value, attributes);
 }
 
 export function recordHistogram(
@@ -135,6 +151,65 @@ export function recordHistogram(
   attributes?: { [key: string]: string | number | boolean },
   unit?: string,
 ): void {
-  if (!globalRecorder) return;
-  globalRecorder.recordHistogram(name, value, attributes, unit);
+  const recorder = getMetricsRecorder();
+  if (!recorder) return;
+  recorder.recordHistogram(name, value, attributes, unit);
+}
+
+export interface RecordLlmMetricsOptions {
+  vendor: string;
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  duration?: number;
+  cost?: number;
+  error?: boolean;
+}
+
+export function recordLlmMetrics(options: RecordLlmMetricsOptions): void {
+  try {
+    const recorder = getMetricsRecorder();
+    if (!recorder) return;
+
+    const attributes: Record<string, string | number | boolean> = {
+      'gen_ai.system': options.vendor,
+    };
+    if (options.model) {
+      attributes['gen_ai.request.model'] = options.model;
+    }
+    const agentId = getAgentId();
+    if (agentId) {
+      attributes['agent.id'] = agentId;
+      attributes['agent_id'] = agentId;
+    }
+    const agentName = getAgentName();
+    if (agentName) {
+      attributes['agent.name'] = agentName;
+    }
+    const env = getEnv();
+    if (env) {
+      attributes['environment'] = env;
+      attributes['env'] = env;
+    }
+
+    if (options.promptTokens !== undefined || options.completionTokens !== undefined) {
+      recorder.recordTokenUsage(options.promptTokens, options.completionTokens, attributes);
+    }
+    if (options.duration !== undefined && options.duration > 0) {
+      recorder.recordDuration(options.duration, attributes);
+    }
+    const cost =
+      options.cost ??
+      (options.model && (options.promptTokens !== undefined || options.completionTokens !== undefined)
+        ? computeCost(options.model, options.promptTokens || 0, options.completionTokens || 0)
+        : undefined);
+    if (cost !== undefined && cost > 0) {
+      recorder.recordCost(cost, attributes);
+    }
+    if (options.error) {
+      recorder.recordException(attributes);
+    }
+  } catch {
+    // Ignore metrics recording failures
+  }
 }
