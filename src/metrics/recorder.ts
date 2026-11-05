@@ -1,4 +1,6 @@
 import { Meter, Histogram, Counter } from "@opentelemetry/api";
+import { getAgentId, getAgentName, getEnv } from '../config/runtime-config';
+import { computeCost } from '../processor/cost-processor';
 
 export class MetricsRecorder {
   private metrics: Record<string, Histogram | Counter>;
@@ -116,7 +118,7 @@ export class MetricsRecorder {
 
 let globalRecorder: MetricsRecorder | null = null;
 
-export function setGlobalRecorder(recorder: MetricsRecorder): void {
+export function setGlobalRecorder(recorder: MetricsRecorder | null): void {
   globalRecorder = recorder;
 }
 
@@ -137,4 +139,62 @@ export function recordHistogram(
 ): void {
   if (!globalRecorder) return;
   globalRecorder.recordHistogram(name, value, attributes, unit);
+}
+
+export interface RecordLlmMetricsOptions {
+  vendor: string;
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  duration?: number;
+  cost?: number;
+  error?: boolean;
+}
+
+export function recordLlmMetrics(options: RecordLlmMetricsOptions): void {
+  try {
+    const recorder = globalRecorder;
+    if (!recorder) return;
+
+    const attributes: Record<string, string | number | boolean> = {
+      'gen_ai.system': options.vendor,
+    };
+    if (options.model) {
+      attributes['gen_ai.request.model'] = options.model;
+    }
+    const agentId = getAgentId();
+    if (agentId) {
+      attributes['agent.id'] = agentId;
+      attributes['agent_id'] = agentId;
+    }
+    const agentName = getAgentName();
+    if (agentName) {
+      attributes['agent.name'] = agentName;
+    }
+    const env = getEnv();
+    if (env) {
+      attributes['environment'] = env;
+      attributes['env'] = env;
+    }
+
+    if (options.promptTokens !== undefined || options.completionTokens !== undefined) {
+      recorder.recordTokenUsage(options.promptTokens, options.completionTokens, attributes);
+    }
+    if (options.duration !== undefined && options.duration > 0) {
+      recorder.recordDuration(options.duration, attributes);
+    }
+    const cost =
+      options.cost ??
+      (options.model && (options.promptTokens !== undefined || options.completionTokens !== undefined)
+        ? computeCost(options.model, options.promptTokens || 0, options.completionTokens || 0)
+        : undefined);
+    if (cost !== undefined && cost > 0) {
+      recorder.recordCost(cost, attributes);
+    }
+    if (options.error) {
+      recorder.recordException(attributes);
+    }
+  } catch {
+    // Ignore metrics recording failures
+  }
 }

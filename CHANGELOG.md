@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Initialize OpenTelemetry MeterProvider and MetricsRecorder during init() (TRC-305). Metrics recorder is registered globally with standard GenAI meters and exported via OTLP; LLM provider wrappers (OpenAI, Anthropic, Gemini, LangChain, OpenAI Agents) wire token usage, operation duration, cost, and exception metrics independent of trace sampling.
 - A policy `clamp_max_tokens` now sets the token cap the provider API takes: `max_output_tokens` for OpenAI Responses and in Gemini's `generation_config`, `max_completion_tokens` or `max_tokens` (whichever the request used) for OpenAI Chat, `max_tokens` for Anthropic. It used to always add `max_tokens`, which Responses and Gemini reject and which left an existing cap untouched. The policy check also sees that cap. Chat requests without a cap get `max_completion_tokens`, since OpenAI reasoning models reject `max_tokens`
 
 ## [0.1.20] - 2026-11-03
