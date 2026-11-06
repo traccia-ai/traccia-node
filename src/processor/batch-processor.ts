@@ -68,21 +68,39 @@ export class BatchSpanProcessor implements ISpanProcessor {
   }
 
   /**
-   * Force flush pending spans. Keeps draining the queue (waiting for any
-   * export already in flight rather than treating "busy" as "empty") until
-   * the queue is truly empty or the deadline is exceeded.
+   * Force flush pending spans. Keeps draining the queue and waiting for the
+   * export chain (including an export the background timer already started,
+   * whose spans are no longer in the queue) until both are empty or the
+   * deadline is exceeded.
    */
   async forceFlush(timeout?: number): Promise<void> {
     const deadline = timeout ? Date.now() + timeout : undefined;
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const flushed = await this.flushOnce(deadline);
-      if (!flushed) {
-        break;
-      }
       if (deadline && Date.now() >= deadline) {
-        break;
+        return;
+      }
+
+      if (this.queue.length > 0) {
+        if (!(await this.untilDeadline(this.flushOnce(deadline), deadline))) {
+          return;
+        }
+        continue;
+      }
+
+      const pending = this.inFlight;
+      if (pending === null) {
+        return;
+      }
+      if (!(await this.untilDeadline(pending, deadline))) {
+        return;
+      }
+      // `pending` has settled, but export() may not have cleared inFlight
+      // yet. If nothing newer chained on and the queue is still empty,
+      // everything is drained.
+      if (this.inFlight === pending && this.queue.length === 0) {
+        return;
       }
     }
   }
@@ -101,6 +119,30 @@ export class BatchSpanProcessor implements ISpanProcessor {
     }
     if (this.exporter) {
       await this.exporter.shutdown();
+    }
+  }
+
+  /**
+   * Await `work`, giving up once the deadline passes. Resolves true if
+   * `work` settled in time. The work itself is not cancelled.
+   */
+  private async untilDeadline(work: Promise<unknown>, deadline?: number): Promise<boolean> {
+    if (!deadline) {
+      await work;
+      return true;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return false;
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), remaining);
+    });
+    try {
+      return await Promise.race([work.then(() => true), expired]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

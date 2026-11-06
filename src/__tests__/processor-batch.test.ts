@@ -353,4 +353,253 @@ describe('BatchSpanProcessor', () => {
         await processor.shutdown();
         jest.useFakeTimers();
     });
+
+    describe('waits for an export already in flight (TRC-279)', () => {
+        // Exporter whose export() calls stay pending until released in order.
+        function gatedExporter() {
+            const events: string[] = [];
+            const gates: Array<() => void> = [];
+            const exporter: jest.Mocked<ISpanExporter> = {
+                export: jest.fn((spans: ISpan[]) => {
+                    const ids = spans.map((s: any) => s._id).join(',');
+                    events.push(`export:start:${ids}`);
+                    return new Promise<boolean>((resolve) => {
+                        gates.push(() => {
+                            events.push(`export:end:${ids}`);
+                            resolve(true);
+                        });
+                    });
+                }),
+                shutdown: jest.fn(async () => {
+                    events.push('exporter:shutdown');
+                }),
+            };
+            const releaseNext = () => {
+                const gate = gates.shift();
+                if (!gate) throw new Error('no export pending');
+                gate();
+            };
+            return { exporter, events, gates, releaseNext };
+        }
+
+        const span = (id: number) => ({ _id: id, context: { traceFlags: 1 } }) as unknown as ISpan;
+        const tick = () => new Promise((r) => setImmediate(r));
+        const untilExportStarts = async (gates: unknown[]) => {
+            for (let i = 0; gates.length === 0; i++) {
+                if (i > 1000) throw new Error('export never started');
+                await tick();
+            }
+        };
+
+        beforeEach(() => {
+            jest.useRealTimers();
+        });
+
+        it('forceFlush does not resolve while a flushOnce export of an emptied queue is pending', async () => {
+            const { exporter, events, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            const background = (processor as any).flushOnce();
+            await tick();
+            expect((processor as any).queue).toHaveLength(0);
+            expect(events).toEqual(['export:start:1']);
+
+            let flushed = false;
+            const flush = processor.forceFlush().then(() => {
+                flushed = true;
+                events.push('forceFlush:resolved');
+            });
+            await tick();
+            await tick();
+            expect(flushed).toBe(false);
+
+            releaseNext();
+            await flush;
+            await background;
+            expect(events).toEqual(['export:start:1', 'export:end:1', 'forceFlush:resolved']);
+
+            await processor.shutdown();
+        });
+
+        it('shutdown does not close the exporter before a timer-started export finishes', async () => {
+            const { exporter, events, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 10 });
+
+            processor.onEnd(span(1));
+            await new Promise((r) => setTimeout(r, 40)); // timer drains span 1, export blocks
+            expect((processor as any).queue).toHaveLength(0);
+            expect(events).toEqual(['export:start:1']);
+
+            let done = false;
+            const shutdown = processor.shutdown().then(() => {
+                done = true;
+            });
+            await new Promise((r) => setTimeout(r, 30));
+            expect(done).toBe(false);
+            expect(exporter.shutdown).not.toHaveBeenCalled();
+
+            releaseNext();
+            await shutdown;
+            expect(events).toEqual(['export:start:1', 'export:end:1', 'exporter:shutdown']);
+        });
+
+        it('shutdown exports spans queued behind the in-flight export before closing the exporter', async () => {
+            const { exporter, events, gates, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            void (processor as any).flushOnce();
+            await tick();
+            processor.onEnd(span(2));
+
+            const shutdown = processor.shutdown();
+            processor.onEnd(span(99)); // ignored: already shutting down
+            await tick();
+            expect(exporter.shutdown).not.toHaveBeenCalled();
+
+            releaseNext();
+            await untilExportStarts(gates);
+            expect(exporter.shutdown).not.toHaveBeenCalled();
+            releaseNext();
+            await shutdown;
+
+            expect(events).toEqual([
+                'export:start:1',
+                'export:end:1',
+                'export:start:2',
+                'export:end:2',
+                'exporter:shutdown',
+            ]);
+        });
+
+        it('waits for every export chained behind the in-flight one', async () => {
+            const { exporter, events, gates, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({
+                exporter,
+                maxExportBatchSize: 1,
+                scheduleDelayMs: 60_000,
+            });
+
+            [1, 2, 3].forEach((id) => processor.onEnd(span(id)));
+            void (processor as any).flushOnce();
+            void (processor as any).flushOnce();
+            void (processor as any).flushOnce();
+            await tick();
+            expect((processor as any).queue).toHaveLength(0);
+
+            let flushed = false;
+            const flush = processor.forceFlush().then(() => {
+                flushed = true;
+            });
+
+            for (let i = 0; i < 3; i++) {
+                await untilExportStarts(gates);
+                await tick();
+                expect(flushed).toBe(false);
+                releaseNext();
+            }
+            await flush;
+            expect(events.filter((e) => e.startsWith('export:end'))).toEqual([
+                'export:end:1',
+                'export:end:2',
+                'export:end:3',
+            ]);
+            expect((processor as any).inFlight).toBeNull();
+
+            await processor.shutdown();
+        });
+
+        it('forceFlush(timeout) honors the deadline when the in-flight export never settles', async () => {
+            const { exporter, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            void (processor as any).flushOnce();
+            await tick();
+
+            const started = Date.now();
+            await processor.forceFlush(50);
+            const elapsed = Date.now() - started;
+            expect(elapsed).toBeGreaterThanOrEqual(40);
+            expect(elapsed).toBeLessThan(1000);
+            expect((processor as any).inFlight).not.toBeNull();
+
+            releaseNext();
+            await processor.shutdown();
+        });
+
+        it('forceFlush(timeout) honors the deadline when its own export hangs', async () => {
+            const { exporter, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            const started = Date.now();
+            await processor.forceFlush(50);
+            expect(Date.now() - started).toBeLessThan(1000);
+            expect(exporter.export).toHaveBeenCalledTimes(1);
+
+            releaseNext();
+            await processor.shutdown();
+        });
+
+        it('forceFlush resolves once the in-flight export rejects', async () => {
+            let reject: (e: Error) => void = () => {};
+            const exporter: jest.Mocked<ISpanExporter> = {
+                export: jest.fn(
+                    (_spans: ISpan[]) =>
+                        new Promise<boolean>((_, rej) => {
+                            reject = rej;
+                        }),
+                ),
+                shutdown: jest.fn().mockResolvedValue(undefined),
+            };
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            void (processor as any).flushOnce();
+            await tick();
+
+            let flushed = false;
+            const flush = processor.forceFlush().then(() => {
+                flushed = true;
+            });
+            await tick();
+            expect(flushed).toBe(false);
+
+            reject(new Error('boom'));
+            await expect(flush).resolves.toBeUndefined();
+            await processor.shutdown();
+            expect(exporter.shutdown).toHaveBeenCalledTimes(1);
+        });
+
+        it('concurrent forceFlush callers all wait for the in-flight export', async () => {
+            const { exporter, releaseNext } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+
+            processor.onEnd(span(1));
+            void (processor as any).flushOnce();
+            await tick();
+
+            const resolved: number[] = [];
+            const flushes = [1, 2, 3].map((n) => processor.forceFlush().then(() => resolved.push(n)));
+            await tick();
+            await tick();
+            expect(resolved).toEqual([]);
+
+            releaseNext();
+            await Promise.all(flushes);
+            expect(resolved.sort()).toEqual([1, 2, 3]);
+            await processor.shutdown();
+        });
+
+        it('forceFlush with nothing queued or in flight resolves immediately', async () => {
+            const { exporter } = gatedExporter();
+            const processor = new BatchSpanProcessor({ exporter, scheduleDelayMs: 60_000 });
+            await expect(processor.forceFlush()).resolves.toBeUndefined();
+            await expect(processor.forceFlush(10)).resolves.toBeUndefined();
+            expect(exporter.export).not.toHaveBeenCalled();
+            await processor.shutdown();
+        });
+    });
 });
