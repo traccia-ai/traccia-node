@@ -9,6 +9,14 @@ const shared = {
   minify: false,
 };
 
+// The source loads dependencies and optional provider SDKs with require(), which esbuild's ESM
+// output turns into a shim that throws ("Dynamic require of ... is not supported") because ES
+// modules have no require. Give the ESM bundles a real one, resolving from the bundle as the
+// CommonJS build does.
+const ESM_REQUIRE_BANNER =
+  "import { createRequire as __tracciaCreateRequire } from 'module';\n" +
+  'const require = __tracciaCreateRequire(import.meta.url);';
+
 export default defineConfig([
   {
     ...shared,
@@ -19,6 +27,7 @@ export default defineConfig([
       'src/integrations/index.ts',
     ],
     format: ['cjs', 'esm'],
+    banner: ({ format }) => (format === 'esm' ? { js: ESM_REQUIRE_BANNER } : {}),
     dts: true,
     clean: true,
     // Optional provider SDKs are devDependencies (for tests) but must never be
