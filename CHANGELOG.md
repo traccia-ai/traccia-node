@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - A governance settle uses the API key, endpoint and agent its policy check used. A call settled during or after `stopTracing()`, which clears the `init()` credentials, is no longer skipped when those were the only credentials
 - The agent enricher prices a span the cost processor left unpriced with the span's `llm.vendor` and cached input tokens, as the cost processor does, so a Groq span is never priced at another provider's rate
+- `observe({ skipArgs })` now keeps the named arguments out of the `function.args` span attribute. It was accepted but ignored, so every argument (tokens and PII included) was recorded. A name matches a parameter name read from the function's source (a listed `...rest` drops everything it collects), or a top-level key when the call has a single plain-object argument, such as `tool({ query, apiKey })`. Destructured parameters and nested keys are not matched, and minified code may have renamed parameters. The function still gets all its arguments
 
 ## [0.1.21] - 2026-11-21
 

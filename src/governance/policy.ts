@@ -57,6 +57,40 @@ export class AgentBlockedError extends Error {
   }
 }
 
+export const IDEMPOTENCY_REPEAT = 'idempotency_repeat';
+export const IDEMPOTENCY_UNCONFIRMED = 'idempotency_unconfirmed';
+export const IDEMPOTENCY_IN_FLIGHT = 'idempotency_in_flight';
+export const IDEMPOTENCY_DENY_REASONS = [IDEMPOTENCY_REPEAT, IDEMPOTENCY_UNCONFIRMED, IDEMPOTENCY_IN_FLIGHT] as const;
+export type IdempotencyDenyReason = (typeof IDEMPOTENCY_DENY_REASONS)[number];
+
+/**
+ * An idempotent tool was denied as a repeat of a call with the same key.
+ *
+ * `reason` is `idempotency_repeat` (the earlier call finished), `idempotency_unconfirmed` (it
+ * timed out or was aborted, so it may or may not have happened) or `idempotency_in_flight` (it
+ * is still running). `alreadyDone` is true only for a finished one, so a compound tool retried
+ * after a later step failed can skip a step that already ran:
+ *
+ *     try { await charge({ order_id, amount }); }
+ *     catch (e) { if (!(e instanceof IdempotencyRepeatError && e.alreadyDone)) throw e; }
+ */
+export class IdempotencyRepeatError extends AgentBlockedError {
+  reason: string;
+
+  constructor(
+    message: string,
+    extras: { reason: string; decisionId?: string; remainingBudgetUsd?: number | null; reasons?: string[] },
+  ) {
+    super(message, extras);
+    this.name = 'IdempotencyRepeatError';
+    this.reason = extras.reason;
+  }
+
+  get alreadyDone(): boolean {
+    return this.reason === IDEMPOTENCY_REPEAT;
+  }
+}
+
 /**
  * govern() or a policy check is missing its API key, endpoint or agent ID.
  * The call is blocked, whatever the fail mode: a misconfigured check never allows.

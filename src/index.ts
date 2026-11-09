@@ -14,9 +14,18 @@ export {
 
 export { observe, ObserveOptions } from './instrumentation/decorator';
 export { govern, GovernOptions } from './governance/govern';
-export { AgentBlockedError, ApprovalPending, GovernanceConfigError, pendingToolResult, checkAgentStatus } from './governance/policy';
+export {
+  AgentBlockedError,
+  ApprovalPending,
+  GovernanceConfigError,
+  IdempotencyRepeatError,
+  pendingToolResult,
+  checkAgentStatus,
+} from './governance/policy';
 export type { PolicyFailMode } from './governance/fail-mode';
 export { checkPolicy } from './governance/pep';
+export { idempotencyKey, Unkeyable } from './governance/idempotency';
+export { DefiniteFailure } from './governance/unconfirmed';
 export { disclosure, enrichGovernanceAttributes } from './governance/disclosure';
 export type { DisclosureOptions, EnrichGovernanceAttributesOptions } from './governance/disclosure';
 export { governanceHooks, GovernanceManager } from './governance/hooks';
