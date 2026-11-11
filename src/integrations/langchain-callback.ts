@@ -15,6 +15,7 @@ import type { ChainValues } from "@langchain/core/utils/types";
 import { getTracer } from '../auto';
 import { ISpan } from '../types';
 import { getCurrentSpan } from "../context/context";
+import { recordLlmMetrics } from "../metrics/recorder";
 
 type LangfusePrompt = {
   name: string;
@@ -47,6 +48,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
 
   private tags: string[] | undefined = [];
 
+  private generationStartTimes: Record<string, number> = {};
   private completionStartTimes: Record<string, Date> = {};
   private promptToParentRunMap;
   private runMap: Map<string, ISpan> = new Map();
@@ -217,6 +219,10 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
     console.debug(
       `Generation start with ID: ${runId} and parentRunId ${parentRunId}`,
     );
+
+    if (runId) {
+      this.generationStartTimes[runId] = Date.now();
+    }
 
     const runName = name ?? llm.id.at(-1)?.toString() ?? "Langchain Generation";
 
@@ -568,10 +574,19 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
           )
           : lastResponse.text;
 
+      const span = this.runMap.get(runId);
+      const resolvedModelName = modelName ?? (span?.attributes?.['model'] as string | undefined);
+      const startTime = this.generationStartTimes[runId];
+      const duration = startTime !== undefined
+        ? Math.max(0.001, (Date.now() - startTime) / 1000)
+        : (runId in this.completionStartTimes
+            ? Math.max(0.001, (Date.now() - this.completionStartTimes[runId].getTime()) / 1000)
+            : undefined);
+
       this.handleSpanEnd({
         runId,
         attributes: {
-          model: modelName,
+          model: resolvedModelName,
           output: extractedOutput,
           completionStartTime:
             runId in this.completionStartTimes
@@ -581,6 +596,15 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
         },
       });
 
+      recordLlmMetrics({
+        vendor: 'langchain',
+        model: resolvedModelName,
+        promptTokens: usageDetails?.input,
+        completionTokens: usageDetails?.output,
+        duration,
+      });
+
+      delete this.generationStartTimes[runId];
       if (runId in this.completionStartTimes) {
         delete this.completionStartTimes[runId];
       }
@@ -597,6 +621,15 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
     try {
       console.debug(`LLM error ${err} with ID: ${runId}`);
 
+      const span = this.runMap.get(runId);
+      const modelName = span?.attributes?.['model'] as string | undefined;
+      const startTime = this.generationStartTimes[runId];
+      const duration = startTime !== undefined
+        ? Math.max(0.001, (Date.now() - startTime) / 1000)
+        : (runId in this.completionStartTimes
+            ? Math.max(0.001, (Date.now() - this.completionStartTimes[runId].getTime()) / 1000)
+            : undefined);
+
       const azureRefusalError = this.parseAzureRefusalError(err);
 
       this.handleSpanEnd({
@@ -605,6 +638,16 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
           level: "ERROR",
           statusMessage: err.toString() + azureRefusalError,
         },
+      });
+
+      delete this.generationStartTimes[runId];
+      delete this.completionStartTimes[runId];
+
+      recordLlmMetrics({
+        vendor: 'langchain',
+        model: modelName,
+        duration,
+        error: true,
       });
     } catch (e) {
       console.debug(e instanceof Error ? e.message : String(e));
