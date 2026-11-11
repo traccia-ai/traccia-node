@@ -111,20 +111,30 @@ function populateAnthropicSpan(span: ISpan, response: unknown): void {
         span.setAttribute('llm.stop_reason', String(stopReason));
     }
 
-    // Extract response content
-    const content = safeGet(response, 'content') as unknown[];
-    if (Array.isArray(content) && content.length > 0) {
-        const textBlock = content.find(
-            (block: unknown) =>
-                typeof block === 'object' &&
-                block !== null &&
-                (block as Record<string, unknown>).type === 'text'
-        ) as Record<string, unknown> | undefined;
-
-        if (textBlock?.text) {
-            span.setAttribute('llm.response', String(textBlock.text).slice(0, 1000));
-        }
+    const completion = anthropicCompletion(response);
+    if (completion) {
+        span.setAttribute('llm.completion', completion.slice(0, 1000));
+        // Deprecated alias of llm.completion, kept for existing readers.
+        span.setAttribute('llm.response', completion.slice(0, 1000));
     }
+}
+
+/**
+ * The text of an Anthropic message: every `text` content block, joined. A cited answer
+ * arrives as several text blocks, and the stream accumulator concatenates every
+ * text_delta the same way, so streamed and non-streamed calls record the same completion.
+ * Thinking, tool_use and other non-text blocks are skipped.
+ */
+export function anthropicCompletion(response: unknown): string | undefined {
+    const content = safeGet(response, 'content');
+    if (!Array.isArray(content)) {
+        return undefined;
+    }
+    const text = content
+        .filter((block) => safeGet(block, 'type') === 'text' && typeof safeGet(block, 'text') === 'string')
+        .map((block) => safeGet(block, 'text') as string)
+        .join('');
+    return text || undefined;
 }
 
 interface AnthropicStreamState {

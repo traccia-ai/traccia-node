@@ -115,6 +115,39 @@ export function redactValue(
   return value;
 }
 
+/**
+ * Attributes holding JSON-serialized guardrail findings or summaries. A finding's
+ * `raw_excerpt` copies text from the span (a completion, an error message), so these are
+ * decoded and their excerpts scrubbed like the attribute they came from. This covers the
+ * per-span findings and the root span's aggregate of every finding in the trace.
+ */
+const GUARDRAIL_JSON_KEYS: ReadonlySet<string> = new Set(["guardrail.findings", "guardrail.summary"]);
+
+function redactGuardrailJson(
+  value: unknown,
+  options: { redactAllStrings?: boolean; extraKeyFragments: ReadonlySet<string> },
+): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value);
+  } catch {
+    // Not the JSON the detector writes: treat the whole value as content.
+    return redactString(value);
+  }
+  const fragments = new Set(options.extraKeyFragments);
+  fragments.add("excerpt");
+  const scrubbed = redactValue(decoded, {
+    redactAllStrings: options.redactAllStrings,
+    extraKeyFragments: fragments,
+  });
+  const encoded = JSON.stringify(scrubbed);
+  // Keep the original bytes when nothing was scrubbed.
+  return encoded === JSON.stringify(decoded) ? value : encoded;
+}
+
 export function redactAttributes(
   attrs: Record<string, unknown> | null | undefined,
   options?: { extraKeyFragments?: Iterable<string>; redactAllStrings?: boolean },
@@ -128,6 +161,10 @@ export function redactAttributes(
   for (const [key, value] of Object.entries(attrs)) {
     if (keyIsAllowlisted(key)) {
       out[key] = value;
+      continue;
+    }
+    if (GUARDRAIL_JSON_KEYS.has(key)) {
+      out[key] = redactGuardrailJson(value, { ...options, extraKeyFragments: fragments });
       continue;
     }
     out[key] = redactValue(value, { ...options, key, extraKeyFragments: fragments });
