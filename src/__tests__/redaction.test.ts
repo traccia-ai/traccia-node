@@ -206,3 +206,35 @@ describe('nested sensitivity (TRC-291 review)', () => {
         expect(out.opaque).toEqual({ v: 'x@y.io' });
     });
 });
+
+describe('guardrail finding excerpts (TRC-282)', () => {
+  const { redactAttributes: redact } = jest.requireActual('../redaction/redaction') as typeof import('../redaction/redaction');
+
+  it('scrubs raw_excerpt inside guardrail.findings and keeps the rest of the finding', () => {
+    const findings = [
+      {
+        name: 'provider_refusal',
+        evidence_ref: { attribute_keys: ['llm.response.status', 'llm.completion'] },
+        raw_excerpt: "I can't help with that, jane@example.com",
+      },
+      { name: 'provider_content_filter', raw_excerpt: 'content_filter' },
+    ];
+    const out = redact({ 'guardrail.findings': JSON.stringify(findings) });
+    const scrubbed = JSON.parse(String(out['guardrail.findings']));
+    expect(scrubbed[0].raw_excerpt).toBe("I can't help with that, [REDACTED_EMAIL]");
+    expect(scrubbed[0].evidence_ref).toEqual(findings[0].evidence_ref);
+    expect(scrubbed[1]).toEqual(findings[1]);
+  });
+
+  it('leaves guardrail JSON without PII byte-identical', () => {
+    const summary = JSON.stringify({ detected_categories: ['moderation'], limitations: [] });
+    const findings = JSON.stringify([{ name: 'x', raw_excerpt: 'nothing sensitive' }]);
+    const out = redact({ 'guardrail.summary': summary, 'guardrail.findings': findings });
+    expect(out['guardrail.summary']).toBe(summary);
+    expect(out['guardrail.findings']).toBe(findings);
+  });
+
+  it('redacts a guardrail value that is not JSON as text', () => {
+    expect(redact({ 'guardrail.findings': 'raw jane@example.com' })['guardrail.findings']).toBe('raw [REDACTED_EMAIL]');
+  });
+});

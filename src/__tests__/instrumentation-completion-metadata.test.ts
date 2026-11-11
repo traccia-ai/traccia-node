@@ -7,6 +7,8 @@ import {
 } from '../instrumentation/openai';
 import { anthropicCompletion, patchAnthropic } from '../instrumentation/anthropic';
 import { getTracer } from '../auto';
+import { GuardrailDetectorProcessor } from '../processor/guardrail-detector';
+import { RedactionSpanProcessor } from '../redaction/processor';
 import { ISpan } from '../types';
 
 jest.mock('../auto', () => ({
@@ -124,6 +126,101 @@ describe('completion and finish metadata against the real provider SDKs (TRC-282
                 }
             }
         );
+
+        const clientToolItems: Record<string, unknown> = {
+            function_call: functionCall,
+            custom_tool_call: { type: 'custom_tool_call', id: 'ct_1', call_id: 'call_ct', name: 'grammar', input: 'x' },
+            computer_call: {
+                type: 'computer_call', id: 'cu_1', call_id: 'call_cu', status: 'completed',
+                action: { type: 'click', button: 'left', x: 1, y: 2 }, pending_safety_checks: [],
+            },
+            local_shell_call: {
+                type: 'local_shell_call', id: 'ls_1', call_id: 'call_ls', status: 'completed',
+                action: { type: 'exec', command: ['ls'], env: {} },
+            },
+            shell_call: {
+                type: 'shell_call', id: 'sh_1', call_id: 'call_sh', status: 'completed',
+                action: { commands: ['ls'], timeout_ms: null, max_output_length: null },
+            },
+            apply_patch_call: {
+                type: 'apply_patch_call', id: 'ap_1', call_id: 'call_ap', status: 'completed',
+                operation: { type: 'create_file', path: 'a.txt', diff: '+a' },
+            },
+            mcp_approval_request: {
+                type: 'mcp_approval_request', id: 'mr_1', name: 'lookup', arguments: '{}', server_label: 'srv',
+            },
+        };
+
+        const hostedToolItems: Record<string, unknown> = {
+            web_search_call: webSearch,
+            file_search_call: { type: 'file_search_call', id: 'fs_1', queries: ['q'], status: 'completed' },
+            code_interpreter_call: {
+                type: 'code_interpreter_call', id: 'ci_1', code: '1', container_id: 'c', outputs: [], status: 'completed',
+            },
+            image_generation_call: { type: 'image_generation_call', id: 'ig_1', result: null, status: 'completed' },
+            mcp_call: { type: 'mcp_call', id: 'mc_1', name: 'lookup', arguments: '{}', server_label: 'srv' },
+        };
+
+        it.each(Object.keys(clientToolItems))('%s hands the turn back: llm.finish_reason is tool_calls', async (type) => {
+            const client = new OpenAI({
+                apiKey: 'test',
+                fetch: jsonFetch(responseBody([message(text('On it.')), clientToolItems[type]])),
+            });
+            const res = await client.responses.create({ model: 'gpt-4o-mini', input: 'hello' });
+            expect(res.output[1].type).toBe(type);
+            expect(span.attributes['llm.finish_reason']).toBe('tool_calls');
+            expect(span.attributes['llm.completion']).toBe('On it.');
+        });
+
+        it.each(Object.keys(hostedToolItems))('%s runs on OpenAI: llm.finish_reason is stop', async (type) => {
+            const client = new OpenAI({
+                apiKey: 'test',
+                fetch: jsonFetch(responseBody([hostedToolItems[type], message(text('Done.'))])),
+            });
+            const res = await client.responses.create({ model: 'gpt-4o-mini', input: 'hello' });
+            expect(res.output[0].type).toBe(type);
+            expect(span.attributes['llm.finish_reason']).toBe('stop');
+        });
+
+        it('with PII redaction on, scrubs the completion copied into guardrail findings, on the span and the root aggregate', async () => {
+            const pii = "I can't help with that, jane.doe@example.com, SSN 123-45-6789.";
+            const scrubbedText = "I can't help with that, [REDACTED_EMAIL], SSN [REDACTED_SSN].";
+            const client = new OpenAI({
+                apiKey: 'test',
+                fetch: jsonFetch(responseBody([message(text(pii))], 'incomplete', 'max_output_tokens')),
+            });
+            await client.responses.create({ model: 'gpt-4o-mini', input: 'hello' });
+
+            // The LLM span as a child, plus its root, through the processors in init() order.
+            const llmSpan = span as ISpan & Record<string, unknown>;
+            llmSpan.context = { traceId: 't1', spanId: 's-llm', traceFlags: 1, traceState: 'x' };
+            llmSpan.parentSpanId = 's-root';
+            const root = {
+                attributes: {} as Record<string, unknown>,
+                setAttribute(k: string, v: unknown) {
+                    this.attributes[k] = v;
+                },
+                context: { traceId: 't1', spanId: 's-root', traceFlags: 1, traceState: 'x' },
+                parentSpanId: undefined,
+            } as unknown as ISpan;
+            const processors = [new GuardrailDetectorProcessor({ heuristicsEnabled: false }), new RedactionSpanProcessor()];
+            for (const s of [llmSpan, root]) {
+                for (const p of processors) {
+                    p.onEnd(s);
+                }
+            }
+
+            for (const s of [llmSpan, root]) {
+                const findings = JSON.parse(String(s.attributes['guardrail.findings'])) as Array<Record<string, unknown>>;
+                const refusalFinding = findings.find((f) => f.name === 'provider_refusal');
+                expect(refusalFinding?.raw_excerpt).toBe(scrubbedText);
+                for (const value of Object.values(s.attributes)) {
+                    expect(String(value)).not.toContain('jane.doe@example.com');
+                    expect(String(value)).not.toContain('123-45-6789');
+                }
+            }
+            expect(llmSpan.attributes['llm.completion']).toBe(scrubbedText);
+        });
 
         it('truncates a long completion', async () => {
             const client = new OpenAI({ apiKey: 'test', fetch: jsonFetch(responseBody([message(text('x'.repeat(5000)))])) });
