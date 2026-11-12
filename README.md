@@ -359,6 +359,7 @@ If a check gets no answer (timeout, connection error, 5xx, or an invalid answer)
 - It is kept for 10 minutes after the last answer that carried it, then the SDK goes back to blocking. A process that has had no answer yet, for example one that starts while Traccia is down, blocks. Calling `init()` again forgets it.
 - A local override applies only when there is no answer: `init({ policyFailMode: 'open' | 'closed' })` for the process, or `govern({ policyFailMode })` for one run and the checks inside it. It never overrides a rejected API key (401/403), a block, a deny or a configuration error. The SDK logs a warning once when it disagrees with your Traccia setting, since the [Traccia Gateway](https://traccia.ai/docs/platform/gateway) follows the setting.
 - `govern({ failOpen })` and `checkAgentStatus(id, { failOpen })` are deprecated: `true` means `policyFailMode: 'open'`, `false` means `'closed'`. Omit it to follow your setting.
+- `init({ checkOutboundHttp: true })` also checks plain `fetch()` calls inside `govern()`, hop by hop through redirects, so an Environment Boundary policy can stop an agent outside production from reaching a production URL.
 
 Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK guide: [Governance in the SDK](https://traccia.ai/docs/sdk/governance).
 
