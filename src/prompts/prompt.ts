@@ -3,6 +3,7 @@
  */
 
 import { getCurrentSpan } from '../context/context';
+import { spanLocalRootId } from '../governance/evidence';
 import { notePromptAttributes } from '../governance/pep';
 import { compileBody, CompileError } from './compile';
 
@@ -146,8 +147,8 @@ export class LoadedPrompt {
       for (const [k, v] of Object.entries(attrs)) {
         target.setAttribute(k, v);
       }
-      const traceId = (target as { context?: { traceId?: unknown } }).context?.traceId;
-      notePromptAttributes(traceId, attrs);
+      const ctx = (target as { context?: { traceId?: unknown } }).context;
+      notePromptAttributes(ctx?.traceId, attrs, spanLocalRootId(target as Parameters<typeof spanLocalRootId>[0]));
     } catch {
       // best-effort
     }

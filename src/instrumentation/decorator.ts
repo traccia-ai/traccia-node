@@ -3,6 +3,7 @@ import { getTracer } from '../auto';
 import { SpanStatus } from '../types';
 import { ATTR_GUARDRAIL_TRIGGERED, ATTR_GUARDRAIL_NAME, ATTR_GUARDRAIL_CATEGORY } from '../guardrails/constants';
 import { enforceToolCall, noteRetrievalAttributes, rememberToolResult } from '../governance/pep';
+import { spanLocalRootId } from '../governance/evidence';
 
 export interface ObserveOptions {
     name?: string;
@@ -113,7 +114,7 @@ function createWrapper(fn: any, options: ObserveOptions, defaultName: string) {
                 if (spanType === 'tool') {
                     rememberToolResult(name, result, toolArgs);
                 }
-                noteRetrievalAttributes(span.context?.traceId, span.attributes);
+                noteRetrievalAttributes(span.context?.traceId, span.attributes, spanLocalRootId(span));
 
                 // Auto-set guardrail.triggered if type is guardrail and result is boolean
                 if (spanType === 'guardrail' && typeof result === 'boolean') {

@@ -46,6 +46,39 @@ describe('W3CTraceContextPropagator', () => {
     expect(context).toBeNull();
   });
 
+  it('should return null for forbidden version ff', () => {
+    const carrier = {
+      traceparent: 'ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+    };
+
+    const context = propagator.extract(carrier);
+    expect(context).toBeNull();
+  });
+
+  it('should return null for invalid flags zz', () => {
+    const carrier = {
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz'
+    };
+
+    const context = propagator.extract(carrier);
+    expect(context).toBeNull();
+  });
+
+  it('should return null for all-zero traceId or spanId', () => {
+    expect(propagator.extract({ traceparent: '00-00000000000000000000000000000000-00f067aa0ba902b7-01' })).toBeNull();
+    expect(propagator.extract({ traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01' })).toBeNull();
+  });
+
+  it('should correctly parse traceFlags 00 (unsampled)', () => {
+    const carrier = {
+      traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00'
+    };
+
+    const context = propagator.extract(carrier);
+    expect(context).not.toBeNull();
+    expect(context?.traceFlags).toBe(0);
+  });
+
   it('should handle missing tracestate', () => {
     const carrier = {
       traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'

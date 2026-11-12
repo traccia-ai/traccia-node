@@ -3,7 +3,21 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
+import {
+  context as otelContext,
+  trace,
+  createTraceState,
+  Context,
+} from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { ISpan } from '../types';
+
+export { AsyncLocalStorageContextManager };
+
+// Automatically register standard OTel context manager if one is not already set
+const defaultContextManager = new AsyncLocalStorageContextManager();
+defaultContextManager.enable();
+otelContext.setGlobalContextManager(defaultContextManager);
 
 interface SpanContext {
   span?: ISpan;
@@ -19,11 +33,48 @@ function spanContext(): AsyncLocalStorage<SpanContext> {
 }
 
 /**
+ * Get the corresponding OpenTelemetry context for a Traccia span.
+ */
+export function getOtelContextForSpan(span?: ISpan): Context {
+  if (!span) {
+    return otelContext.active();
+  }
+
+  if (span.otelSpan) {
+    return trace.setSpan(otelContext.active(), span.otelSpan);
+  }
+
+  if (span.context) {
+    const traceState = span.context.traceState
+      ? (typeof span.context.traceState === 'string'
+          ? createTraceState(span.context.traceState)
+          : span.context.traceState)
+      : undefined;
+
+    return trace.setSpanContext(otelContext.active(), {
+      traceId: span.context.traceId,
+      spanId: span.context.spanId,
+      traceFlags: span.context.traceFlags ?? 1,
+      traceState,
+    });
+  }
+
+  return otelContext.active();
+}
+
+/**
  * Get the current span from context.
  */
 export function getCurrentSpan(): ISpan | undefined {
   const ctx = spanContext().getStore();
   return ctx?.span;
+}
+
+/**
+ * Check whether an active Traccia context store exists.
+ */
+export function hasActiveContext(): boolean {
+  return spanContext().getStore() !== undefined;
 }
 
 /**
@@ -39,14 +90,16 @@ export function setCurrentSpan(span: ISpan | undefined): void {
  * Run a function with a specific span as the current span.
  */
 export function runWithSpan<T>(span: ISpan, fn: () => T): T {
-  return spanContext().run({ span }, fn);
+  const otelCtx = getOtelContextForSpan(span);
+  return otelContext.with(otelCtx, () => spanContext().run({ span }, fn));
 }
 
 /**
  * Run a function with a specific span as the current span (async).
  */
 export function runWithSpanAsync<T>(span: ISpan, fn: () => Promise<T>): Promise<T> {
-  return spanContext().run({ span }, fn);
+  const otelCtx = getOtelContextForSpan(span);
+  return otelContext.with(otelCtx, () => spanContext().run({ span }, fn));
 }
 
 /**
