@@ -158,4 +158,423 @@ describe('@observe Decorator', () => {
             expect(result).toBe(target);
         });
     });
+
+    describe('TRC-292: skipArgs redaction & safe serialization', () => {
+        it('redacts positional arguments matching skipArgs by index', async () => {
+            const login = async (username: string, password: string) => {
+                return `user-${username}`;
+            };
+            const wrapped = observe({ skipArgs: ['1'] })(login);
+
+            const result = await wrapped('alice', 'synthetic-super-secret-password');
+
+            expect(result).toBe('user-alice');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('synthetic-super-secret-password')
+            );
+        });
+
+        it('redacts object properties matching skipArgs', async () => {
+            const login = async (creds: { username: string; password: string }) => {
+                return creds.username;
+            };
+            const wrapped = observe({ skipArgs: ['password'] })(login);
+
+            const result = await wrapped({
+                username: 'alice',
+                password: 'synthetic-super-secret-password',
+            });
+
+            expect(result).toBe('alice');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('synthetic-super-secret-password')
+            );
+        });
+
+        it('supports skip_args snake_case alias', async () => {
+            const handler = async (creds: { secretKey: string }) => 'ok';
+            const wrapped = observe({ skip_args: ['secretKey'] })(handler);
+
+            await wrapped({ secretKey: 'my-secret-token' });
+
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[REDACTED]')
+            );
+            expect(mockSpan.setAttribute).not.toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('my-secret-token')
+            );
+        });
+
+        it('safely serializes BigInt arguments without throwing and executes application function', async () => {
+            let invokedWith: bigint | null = null;
+            const processBigInt = async (amount: bigint) => {
+                invokedWith = amount;
+                return amount * 2n;
+            };
+            const wrapped = observe({ name: 'bigint-test' })(processBigInt);
+
+            const result = await wrapped(9007199254740993n);
+
+            expect(result).toBe(18014398509481986n);
+            expect(invokedWith).toBe(9007199254740993n);
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('9007199254740993n')
+            );
+        });
+
+        it('safely serializes circular arguments without throwing and executes application function', async () => {
+            let invoked = false;
+            const circular: any = { name: 'cycle' };
+            circular.self = circular;
+
+            const processCircular = async (input: any) => {
+                invoked = true;
+                return input.name;
+            };
+            const wrapped = observe({ name: 'circular-test' })(processCircular);
+
+            const result = await wrapped(circular);
+
+            expect(invoked).toBe(true);
+            expect(result).toBe('cycle');
+            expect(mockSpan.setAttribute).toHaveBeenCalledWith(
+                'function.args',
+                expect.stringContaining('[Circular]')
+            );
+        });
+
+        it('bounds function.args string length to 1000 characters', async () => {
+            const longString = 'a'.repeat(2000);
+            const fn = async (text: string) => text.length;
+            const wrapped = observe({})(fn);
+
+            await wrapped(longString);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            expect(argsCall[1].length).toBeLessThanOrEqual(1000);
+        });
+
+        it('redacts multiple positional arguments by index', async () => {
+            const fn = async (user: string, token: string, secret: string) => `${user}-ok`;
+            const wrapped = observe({ skipArgs: ['1', '2'] })(fn);
+
+            await wrapped('alice', 'raw-token-123', 'raw-secret-456');
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('alice');
+            expect(exported[1]).toBe('[REDACTED]');
+            expect(exported[2]).toBe('[REDACTED]');
+            expect(argsCall[1]).not.toContain('raw-token-123');
+            expect(argsCall[1]).not.toContain('raw-secret-456');
+        });
+
+        it('supports numeric index in skipArgs array', async () => {
+            const fn = async (apiKey: string, count: number) => count;
+            const wrapped = observe({ skipArgs: [0 as any] })(fn);
+
+            await wrapped('sk-secret-key-999', 42);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((c: any[]) => c[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('[REDACTED]');
+            expect(exported[1]).toBe(42);
+        });
+
+        it('preserves class toJSON() serializers and serializes Date objects properly', async () => {
+            // Test comment 3 from review: credentials object with toJSON() and Date object
+            class Credentials {
+                public username = 'alice';
+                public passwordHash = 'super_secret_hash_value';
+                public createdAt = new Date('2026-10-19T12:00:00.000Z');
+
+                public toJSON() {
+                    return {
+                        username: this.username,
+                        createdAt: this.createdAt,
+                    };
+                }
+            }
+
+            const creds = new Credentials();
+            const fn = async (c: Credentials) => c.username;
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            await wrapped(creds);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exportedJson = JSON.parse(argsCall[1]);
+            // passwordHash should NOT be present (toJSON omitted it)
+            expect(exportedJson[0].passwordHash).toBeUndefined();
+            expect(exportedJson[0].username).toBe('alice');
+            // createdAt should be a serialized ISO string, not `{}`
+            expect(exportedJson[0].createdAt).toBe('2026-10-19T12:00:00.000Z');
+        });
+
+        it('redacts nested object properties and arrays of objects matching skipArgs', async () => {
+            const processBatch = async (payload: any) => 'processed';
+            const wrapped = observe({ skipArgs: ['password', 'apiKey'] })(processBatch);
+
+            await wrapped({
+                account: 'acc_123',
+                creds: {
+                    apiKey: 'sensitive_key_val',
+                },
+                users: [
+                    { name: 'u1', password: 'secret_user_1' },
+                    { name: 'u2', password: 'secret_user_2' },
+                ],
+            });
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0].creds.apiKey).toBe('[REDACTED]');
+            expect(exported[0].users[0].password).toBe('[REDACTED]');
+            expect(exported[0].users[1].password).toBe('[REDACTED]');
+            expect(argsCall[1]).not.toContain('sensitive_key_val');
+            expect(argsCall[1]).not.toContain('secret_user_1');
+            expect(argsCall[1]).not.toContain('secret_user_2');
+        });
+
+        it('redacts by positional index when specified in skipArgs', async () => {
+            const fn = async (unnamed0: string, unnamed1: string) => 'ok';
+            const wrapped = observe({ skipArgs: ['1'] })(fn);
+
+            await wrapped('public-data', 'sensitive-index-1-data');
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('public-data');
+            expect(exported[1]).toBe('[REDACTED]');
+        });
+
+        it('fails closed and outputs [REDACTED] if serialization encounters an error when redacting', async () => {
+            // An object with a throwing getter when stringified
+            const bomb: any = {
+                get badProperty() {
+                    throw new Error('Explosion during stringify');
+                },
+            };
+            const fn = async (data: any) => 'safe';
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+
+            // Application execution should proceed safely
+            const result = await wrapped(bomb);
+            expect(result).toBe('safe');
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            // Fails closed: does NOT leak unredacted properties
+            expect(argsCall[1]).toBe('[REDACTED]');
+        });
+
+        it('does not treat repeated object references as cycles', async () => {
+            const user = { id: 42 };
+            const fn = async (u1: any, u2: any) => 'ok';
+            const wrapped = observe()(fn);
+            await wrapped(user, user);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported).toEqual([{ id: 42 }, { id: 42 }]);
+        });
+
+        it('prevents redaction bypass when toJSON() moves secret property to another field', async () => {
+            class SensitiveAccount {
+                public id = 'acc_1';
+                public password = 'super_secret_password';
+                public toJSON() {
+                    return {
+                        id: this.id,
+                        token: `bearer-${this.password}`,
+                    };
+                }
+            }
+
+            const fn = async (acc: SensitiveAccount) => acc.id;
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+            await wrapped(new SensitiveAccount());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0].token).toBe('bearer-[REDACTED]');
+            expect(argsCall[1]).not.toContain('super_secret_password');
+        });
+
+        it('prevents redaction bypass when toJSON() moves secret into a string', async () => {
+            class StringSecret {
+                public password = 'raw_secret_value';
+                public toJSON() {
+                    return `secret:${this.password}`;
+                }
+            }
+
+            const fn = async (sec: StringSecret) => 'ok';
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+            await wrapped(new StringSecret());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('secret:[REDACTED]');
+            expect(argsCall[1]).not.toContain('raw_secret_value');
+        });
+
+        it('fails closed if toJSON() throws on an object with sensitive fields', async () => {
+            class ExplodingSecret {
+                public password = 'secret_pass';
+                public toJSON() {
+                    throw new Error('Explosion');
+                }
+            }
+
+            const fn = async (sec: ExplodingSecret) => 'ok';
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+            await wrapped(new ExplodingSecret());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            expect(argsCall[1]).toBe('[REDACTED]');
+        });
+
+        it('prevents redaction bypass when toJSON() reads nested secrets via this.auth.password', async () => {
+            class NestedSecret {
+                public auth = {
+                    username: 'alice',
+                    password: 'nested_secret_password',
+                };
+                public toJSON() {
+                    return {
+                        user: this.auth.username,
+                        value: this.auth.password,
+                    };
+                }
+            }
+
+            const fn = async (req: NestedSecret) => req.auth.username;
+            const wrapped = observe({ skipArgs: ['password'] })(fn);
+            await wrapped(new NestedSecret());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toEqual({
+                user: 'alice',
+                value: '[REDACTED]',
+            });
+            expect(argsCall[1]).not.toContain('nested_secret_password');
+        });
+
+        it('prevents redaction bypass when toJSON() reads deeply nested arrays, Maps, or getters', async () => {
+            const closureSecret = { password: 'closure_secret_value' };
+            class DeepNestedSecret {
+                public items = [{ nested: { password: 'array_secret_value' } }];
+                public tokens = new Map([['primary', { password: 'map_secret_value' }]]);
+                public get auth() {
+                    return closureSecret;
+                }
+                public toJSON() {
+                    return {
+                        fromArr: this.items[0].nested.password,
+                        fromMap: this.tokens.get('primary')?.password,
+                        fromGetter: this.auth.password,
+                    };
+                }
+            }
+
+            const wrapped = observe({ skipArgs: ['password'] })(async (_x: DeepNestedSecret) => 'ok');
+            await wrapped(new DeepNestedSecret());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toEqual({
+                fromArr: '[REDACTED]',
+                fromMap: '[REDACTED]',
+                fromGetter: '[REDACTED]',
+            });
+            expect(argsCall[1]).not.toContain('array_secret_value');
+            expect(argsCall[1]).not.toContain('map_secret_value');
+            expect(argsCall[1]).not.toContain('closure_secret_value');
+        });
+
+        it('preserves URL and Buffer toJSON() while handling self-referential toJSON() safely', async () => {
+            const selfCycle: any = { password: 'secret', name: 'root' };
+            selfCycle.self = selfCycle;
+            selfCycle.toJSON = function () {
+                return { selfName: this.self.name, leaked: this.self.password };
+            };
+
+            const wrapped = observe({ skipArgs: ['password'] })(
+                async (_u: URL, _b: Buffer, _c: unknown) => 'ok',
+            );
+            await wrapped(new URL('https://example.com/path'), Buffer.from('hi'), selfCycle);
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            const exported = JSON.parse(argsCall[1]);
+            expect(exported[0]).toBe('https://example.com/path');
+            expect(exported[1]).toEqual({ type: 'Buffer', data: [104, 105] });
+            expect(exported[2]).toEqual({ selfName: 'root', leaked: '[REDACTED]' });
+            expect(argsCall[1]).not.toContain('secret');
+        });
+
+        it('fails closed if toJSON() reads private class fields alongside skipArgs', async () => {
+            class PrivateSecret {
+                #password = 'private_field_secret';
+                public toJSON() {
+                    return { value: this.#password };
+                }
+            }
+
+            const wrapped = observe({ skipArgs: ['password'] })(async (_p: PrivateSecret) => 'ok');
+            await wrapped(new PrivateSecret());
+
+            const calls = mockSpan.setAttribute.mock.calls;
+            const argsCall = calls.find((call: any[]) => call[0] === 'function.args');
+            expect(argsCall).toBeDefined();
+            expect(argsCall[1]).toBe('[REDACTED]');
+            expect(argsCall[1]).not.toContain('private_field_secret');
+        });
+    });
 });
