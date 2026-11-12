@@ -6,6 +6,7 @@ export type { GovernOptions } from './govern';
 export { AgentBlockedError, ApprovalPending, GovernanceConfigError, pendingToolResult, checkAgentStatus } from './policy';
 export type { PolicyFailMode } from './fail-mode';
 export { checkPolicy } from './pep';
+export { patchOutboundFetch, setOutboundHttpChecks } from './outbound-http';
 export { configureGovernance, govConfig } from './config';
 export { governanceHooks, GovernanceManager } from './hooks';
 export type { GovernanceHook } from './hooks';
