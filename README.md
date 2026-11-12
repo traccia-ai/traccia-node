@@ -60,6 +60,53 @@ const service = new Service();
 await service.doWork('hello');
 ```
 
+### Function & Method Tracing (`@observe`)
+
+Use `@observe` as a TypeScript method decorator or as a higher-order function wrapper to trace execution and automatically report telemetry to Traccia.
+
+```typescript
+import { observe } from '@traccia/sdk';
+
+// 1. As a method decorator (redacting object properties)
+class AuthService {
+  @observe({ name: 'authenticate', skipArgs: ['password'] })
+  async login(credentials: { username: string; password: string }) {
+    // credentials.password is redacted to '[REDACTED]' in Traccia telemetry
+    return 'token_123';
+  }
+}
+
+// 2. As a function wrapper (redacting positional arguments by index)
+const processPayment = observe({
+  name: 'process_payment',
+  skipArgs: ['1'], // Redacts the 2nd positional argument (cvv)
+})(async (orderId: string, cvv: string, amount: number) => {
+  return `Processed ${orderId}`;
+});
+```
+
+#### Argument Redaction (`skipArgs`)
+
+Traccia automatically captures function arguments (`function.args`) in a safe, bounded JSON representation with built-in BigInt and circular-reference handling.
+
+Use `skipArgs` (or `skip_args`) to redact sensitive data before it reaches Traccia:
+
+* **Object Keys:** Specifying property names such as `skipArgs: ['password', 'apiKey']` redacts matching keys on object arguments (e.g. `{ username: 'alice', password: '[REDACTED]' }`).
+* **Positional Arguments:** Specifying 0-based indexes such as `skipArgs: ['1']` (or `[1]`) redacts positional arguments by index (e.g. `["ORD-123", "[REDACTED]", 99]`).
+
+> **Note on Positional Arguments:** In JavaScript and TypeScript, runtime parameter names are not preserved reliably due to bundlers, minifiers (e.g., Terser, esbuild), transpilation, or destructuring. Therefore, **positional arguments require indexes** such as `skipArgs: ['1']`, while key names such as `['password']` redact only object keys.
+
+#### Additional `@observe` Options
+
+| Option | Type | Description |
+|---|---|---|
+| `name` | `string` | Custom span name (defaults to method or function name). |
+| `type` / `asType` | `'span' \| 'tool' \| 'llm' \| 'guardrail'` | Type of span to emit (matches Python `as_type`). |
+| `skipArgs` / `skip_args` | `string[]` | Object keys (e.g. `['password']`) or positional indexes (e.g. `['0', '1']`) to redact. |
+| `skipResult` / `skip_result` | `boolean` | When `true`, suppresses capturing the return value. |
+| `attributes` | `Record<string, unknown>` | Custom attributes attached to the span. |
+| `tags` | `string[]` | List of tags assigned to `span.tags`. |
+
 ### Load a versioned prompt
 
 Fetch prompts from your Traccia library by name and deploy label. Compiling fills `{{variables}}` and stamps the active span with prompt identity.
