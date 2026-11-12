@@ -13,6 +13,8 @@ import {
   ReadEvidence,
   retrievalByTrace,
   runKey,
+  spanLocalRootId,
+  traceKey,
 } from './evidence';
 import { govConfig } from './config';
 import * as failMode from './fail-mode';
@@ -61,9 +63,21 @@ function resourceId(row: unknown): string | undefined {
   return undefined;
 }
 
+function resolveLocalRootId(traceId: unknown, explicitRootId?: unknown): string | undefined {
+  if (explicitRootId != null && explicitRootId !== '') {
+    return String(explicitRootId);
+  }
+  const current = getCurrentSpan();
+  if (current && traceKey(current.context?.traceId) === traceKey(traceId)) {
+    return spanLocalRootId(current);
+  }
+  return undefined;
+}
+
 /** Freshness evidence belongs to one tenant, agent and run. */
 function readScope(): { key: string; traceId: string } | undefined {
-  const traceId = runKey(getCurrentSpan()?.context?.traceId);
+  const span = getCurrentSpan();
+  const traceId = runKey(span?.context?.traceId, spanLocalRootId(span));
   if (!traceId) {
     return undefined;
   }
@@ -107,8 +121,9 @@ export function rememberToolResult(name: string, result: unknown, args?: unknown
 export function noteRetrievalAttributes(
   traceId: string | undefined,
   attributes: Record<string, unknown> | undefined,
+  localRootSpanId?: string,
 ): void {
-  const key = runKey(traceId);
+  const key = runKey(traceId, resolveLocalRootId(traceId, localRootSpanId));
   if (!key || !attributes) {
     return;
   }
@@ -141,8 +156,8 @@ function freshnessContext(resource?: string): Array<Record<string, string>> {
     .map((item) => ({ ...item }) as Record<string, string>);
 }
 
-function retrievalContext(traceId: string | undefined): Record<string, unknown> {
-  const key = runKey(traceId);
+function retrievalContext(traceId: string | undefined, localRootSpanId?: string): Record<string, unknown> {
+  const key = runKey(traceId, resolveLocalRootId(traceId, localRootSpanId));
   if (!key) {
     return { present: false };
   }
@@ -160,6 +175,7 @@ function retrievalContext(traceId: string | undefined): Record<string, unknown> 
 export function notePromptAttributes(
   traceId: unknown,
   attributes?: Record<string, unknown> | null,
+  localRootSpanId?: string,
 ): void {
   if (!attributes) {
     return;
@@ -168,7 +184,7 @@ export function notePromptAttributes(
   if (!name) {
     return;
   }
-  const key = runKey(traceId);
+  const key = runKey(traceId, resolveLocalRootId(traceId, localRootSpanId));
   if (!key) {
     return;
   }
@@ -195,7 +211,7 @@ function promptContext(): Record<string, unknown> {
   if (fromSpan.name) {
     return fromSpan;
   }
-  const traceId = runKey(span?.context?.traceId);
+  const traceId = runKey(span?.context?.traceId, spanLocalRootId(span));
   if (!traceId) {
     return fromSpan;
   }
@@ -502,11 +518,12 @@ export async function enforceLlmCall(
   const [capParams, capKey] = tokenCap(kwargs, vendor, api);
   const span = getCurrentSpan();
   const traceId = asOtelHex(span?.context?.traceId, 32);
+  const localRootId = spanLocalRootId(span);
   const context: Record<string, unknown> = {
     model,
     max_tokens: capParams[capKey],
     input_tokens: estimateTokens(kwargs),
-    retrieval: retrievalContext(traceId),
+    retrieval: retrievalContext(traceId, localRootId),
   };
   if (vendor) {
     context.vendor = vendor;

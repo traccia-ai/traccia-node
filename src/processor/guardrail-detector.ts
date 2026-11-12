@@ -7,7 +7,7 @@
  * root span when it ends -- by that point all child spans have already been
  * processed, so the full picture is available.
  * 
- * State is scoped by trace_id, making this safe for concurrent runs.
+ * State is scoped by trace ID and local request root.
  */
 
 import { ISpan, ISpanProcessor } from "../types";
@@ -31,17 +31,25 @@ interface TraceState {
  * Guardrail detector processor.
  */
 export class GuardrailDetectorProcessor implements ISpanProcessor {
+  private static readonly MAX_TRACES = 10000;
   private heuristicsEnabled: boolean;
   private traces: Map<string, TraceState> = new Map();
 
-  constructor(options?: GuardrailDetectorOptions) {
+  public constructor(options?: GuardrailDetectorOptions) {
     this.heuristicsEnabled = options?.heuristicsEnabled ?? true;
+  }
+
+  /**
+   * Return number of active traces currently in memory.
+   */
+  public getTraceCount(): number {
+    return this.traces.size;
   }
 
   /**
    * Called before OTel span.end(); span is still mutable.
    */
-  onEnd(span: ISpan): void {
+  public onEnd(span: ISpan): void {
     try {
       const attrs = span.attributes;
       const spanId = span.context.spanId;
@@ -74,24 +82,30 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         }
       }
 
-      // Accumulate into trace-scoped state
-      let state = this.traces.get(traceId);
+      // Scope state to trace ID and local request root if present
+      const isLocalRoot = span.isLocalRoot ?? (span.parentSpanId === undefined || Boolean(span.isRemoteParent));
+      const scopeKey = span.localRootSpanId ? `${traceId}:${span.localRootSpanId}` : traceId;
+
+      let state = this.traces.get(scopeKey);
       if (!state) {
+        if (this.traces.size >= GuardrailDetectorProcessor.MAX_TRACES) {
+          const oldestKey: string | undefined = this.traces.keys().next().value as string | undefined;
+          if (oldestKey !== undefined) {
+            this.traces.delete(oldestKey);
+          }
+        }
         state = { spanAttrs: [], spanIds: [], findings: [] };
-        this.traces.set(traceId, state);
+        this.traces.set(scopeKey, state);
       }
       state.spanAttrs.push(attrs);
       state.spanIds.push(spanId);
       state.findings.push(...findings);
 
-      // If this is the root span, compute and write the aggregated summary
-      // Root span has no parent
-      const isRoot = !span.context.traceState || span.parentSpanId === undefined;
-      if (isRoot) {
-        this.writeSummary(span, traceId);
+      // Finalize aggregated summary on local request root
+      if (isLocalRoot) {
+        this.writeSummary(span, scopeKey);
       }
     } catch (exc) {
-      // Log warning but don't crash
       console.warn(
         `[Traccia] GuardrailDetectorProcessor.onEnd failed: ${exc instanceof Error ? exc.message : String(exc)}`,
       );
@@ -101,15 +115,15 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
   /**
    * Compute the full guardrail summary and write it onto the root span.
    */
-  private writeSummary(span: ISpan, traceId: string): void {
-    const state = this.traces.get(traceId);
+  private writeSummary(span: ISpan, scopeKey: string): void {
+    const state = this.traces.get(scopeKey);
 
     if (!state) {
       return;
     }
 
-    // Remove this trace state now that we're processing the summary
-    this.traces.delete(traceId);
+    // Remove trace state once summary is processed
+    this.traces.delete(scopeKey);
 
     try {
       const summary = evaluateRun({
@@ -160,11 +174,11 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
     }
   }
 
-  shutdown(): void {
+  public shutdown(): void {
     this.traces.clear();
   }
 
-  forceFlush(_timeout?: number): void {
+  public forceFlush(_timeout?: number): void {
     // No-op - guardrails are computed on span end, not batched
   }
 }
