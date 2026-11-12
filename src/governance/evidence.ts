@@ -3,9 +3,10 @@
  *
  * Evidence (last reads, retrieval counts, compiled prompts) belongs to one run:
  * one top-level govern() call (nested calls join it), so separate runs never share
- * evidence even under one parent trace. Outside govern() the trace is the run.
- * Entries are keyed by trace id, dropped when the local root span ends, and
- * bounded by expiry and size so traces that never end here cannot grow memory.
+ * evidence even under one parent trace. Outside govern() the local request root
+ * (trace id + local root span id) is the run. Entries are dropped when the local
+ * root span ends, and bounded by expiry and size so traces that never end here
+ * cannot grow memory.
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
@@ -87,7 +88,7 @@ export const promptByTrace = new EvidenceStore<{ name: string; label?: unknown; 
 
 const STORES: Array<EvidenceStore<unknown>> = [lastReads, retrievalByTrace, promptByTrace];
 
-export function traceKey(traceId: unknown): string | undefined {
+export function traceKey(traceId: unknown, localRootSpanId?: unknown): string | undefined {
   if (traceId == null) {
     return undefined;
   }
@@ -97,12 +98,42 @@ export function traceKey(traceId: unknown): string | undefined {
   } else {
     text = String(traceId).trim().toLowerCase();
   }
-  return /^0*$/.test(text) ? undefined : text;
+  if (/^0*$/.test(text)) {
+    return undefined;
+  }
+  if (localRootSpanId != null) {
+    let rootText: string;
+    if (typeof localRootSpanId === 'bigint' || (typeof localRootSpanId === 'number' && Number.isInteger(localRootSpanId))) {
+      rootText = localRootSpanId.toString(16).padStart(16, '0');
+    } else {
+      rootText = String(localRootSpanId).trim().toLowerCase();
+    }
+    if (rootText && !/^0*$/.test(rootText)) {
+      return `${text}:${rootText}`;
+    }
+  }
+  return text;
 }
 
-/** The run evidence belongs to: the enclosing govern() run, else the trace. */
-export function runKey(traceId: unknown): string | undefined {
-  return runScope.getStore() ?? traceKey(traceId);
+/** The local request root id on a span, when it belongs to a local root boundary. */
+export function spanLocalRootId(
+  span?: { localRootSpanId?: unknown; isLocalRoot?: boolean; context?: { spanId?: unknown } } | null,
+): string | undefined {
+  if (!span) {
+    return undefined;
+  }
+  if (span.localRootSpanId != null && span.localRootSpanId !== '') {
+    return String(span.localRootSpanId);
+  }
+  if (span.isLocalRoot && span.context?.spanId != null && span.context.spanId !== '') {
+    return String(span.context.spanId);
+  }
+  return undefined;
+}
+
+/** The run evidence belongs to: the enclosing govern() run, else the local request root (or trace). */
+export function runKey(traceId: unknown, localRootSpanId?: unknown): string | undefined {
+  return runScope.getStore() ?? traceKey(traceId, localRootSpanId);
 }
 
 function forget(run: string): void {
@@ -111,9 +142,9 @@ function forget(run: string): void {
   }
 }
 
-/** Drop all evidence recorded for a finished trace. */
-export function forgetTrace(traceId: unknown): void {
-  const key = traceKey(traceId);
+/** Drop all evidence recorded for a finished local request root (or bare trace). */
+export function forgetTrace(traceId: unknown, localRootSpanId?: unknown): void {
+  const key = traceKey(traceId, localRootSpanId);
   if (key) {
     forget(key);
   }

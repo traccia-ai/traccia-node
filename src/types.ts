@@ -1,3 +1,5 @@
+import type { Span as OTelSpan } from '@opentelemetry/api';
+
 /**
  * Core types and interfaces for the tracing SDK.
  */
@@ -50,6 +52,10 @@ export interface ISpan {
   end(): void;
   recordException(error: Error, attributes?: Record<string, unknown>): void;
   isRecording(): boolean;
+  otelSpan?: OTelSpan;
+  isRemoteParent?: boolean;
+  isLocalRoot?: boolean;
+  localRootSpanId?: string;
 }
 
 /**
@@ -71,6 +77,7 @@ export interface ITracer {
     options?: {
       attributes?: Record<string, unknown>;
       parent?: ISpan | null;
+      parentContext?: ISpanContext | null;
     }
   ): Promise<T> | T;
 }

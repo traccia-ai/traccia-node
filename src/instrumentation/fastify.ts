@@ -5,7 +5,9 @@
  */
 
 import { getTracer } from '../auto';
-import { SpanStatus, ISpan } from '../types';
+import { SpanStatus, ISpan, ISpanContext } from '../types';
+import { extractHttpHeaders } from '../context';
+import { runWithSpan } from '../context/context';
 
 /**
  * Fastify-compatible request object.
@@ -132,7 +134,19 @@ export function fastifyPlugin(options: FastifyTracingOptions = {}) {
                 spanName?.(request) ||
                 `${request.method} ${request.routerPath || path}`;
 
-            const span = tracer.startSpan(name);
+            let parentContext: ISpanContext | undefined;
+            if (request.headers) {
+                parentContext = extractHttpHeaders(request.headers as Record<string, string>) || undefined;
+            }
+
+            const span = parentContext
+                ? tracer.startSpan(name, { parentContext })
+                : tracer.startSpan(name);
+
+            span.isLocalRoot = true;
+            if (span.context?.spanId) {
+                span.localRootSpanId = span.context.spanId;
+            }
 
             // Set basic attributes
             span.setAttribute('span.type', 'TOOL');
@@ -171,7 +185,9 @@ export function fastifyPlugin(options: FastifyTracingOptions = {}) {
             (request as FastifyRequest & { _tracciaSpan?: ISpan; _tracciaStartTime?: number })._tracciaSpan = span;
             (request as FastifyRequest & { _tracciaStartTime?: number })._tracciaStartTime = startTime;
 
-            hookDone();
+            runWithSpan(span, () => {
+                hookDone();
+            });
         });
 
         // Hook: onResponse - end span
@@ -205,9 +221,12 @@ export function fastifyPlugin(options: FastifyTracingOptions = {}) {
                 span.recordException(error);
                 span.status = SpanStatus.ERROR;
                 span.statusDescription = error.message;
+                runWithSpan(span, () => {
+                    hookDone();
+                });
+            } else {
+                hookDone();
             }
-
-            hookDone();
         });
 
         done();

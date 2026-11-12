@@ -6,9 +6,12 @@ import axios from 'axios';
 import { trace } from '@opentelemetry/api';
 import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
 import { observe } from '../instrumentation/decorator';
+import { expressMiddleware } from '../instrumentation/express';
+import { fastifyPlugin } from '../instrumentation/fastify';
+import { runIdentity } from '../config/runtime-config';
 import { govern } from '../governance/govern';
 import { getCurrentSpan } from '../context/context';
-import { _resetPepStateForTests, _setPepHttpClientForTests, notePromptAttributes } from '../governance/pep';
+import { _resetPepStateForTests, _setPepHttpClientForTests, enforceLlmCall, notePromptAttributes } from '../governance/pep';
 import { EvidenceStore, lastReads, promptByTrace, retrievalByTrace } from '../governance/evidence';
 
 jest.mock('../config/config', () => ({
@@ -187,5 +190,180 @@ describe('governance evidence scoping', () => {
     jest.spyOn(Date, 'now').mockReturnValue(now + 61_000);
     expect(store.get('t9')).toBeUndefined();
     jest.restoreAllMocks();
+  });
+
+  it('drops evidence on remote-root completion and isolates replayed traceparent headers in Express outside govern()', async () => {
+    const middleware = expressMiddleware();
+    const sharedTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const retrieve = observe({ name: 'retrieve' })(async () => {
+      getCurrentSpan()?.setAttribute('traccia.retrieval.chunk_count', 7);
+    });
+
+    const makeReqRes = (remoteSpanId: string) => {
+      const listeners: Record<string, Array<() => void>> = {};
+      const req: any = {
+        method: 'POST',
+        url: '/chat',
+        path: '/chat',
+        headers: { traceparent: `00-${sharedTraceId}-${remoteSpanId}-01` },
+      };
+      const res: any = {
+        statusCode: 200,
+        on: (event: string, cb: () => void) => {
+          listeners[event] = listeners[event] || [];
+          listeners[event].push(cb);
+        },
+      };
+      const finish = () => {
+        for (const cb of listeners.finish || []) cb();
+      };
+      return { req, res, finish };
+    };
+
+    // Request A performs retrieval, prompt note, and freshness read, overlapping concurrently with Request B
+    const { req: reqA, res: resA, finish: finishA } = makeReqRes('1111111111111111');
+    const { req: reqB, res: resB, finish: finishB } = makeReqRes('1111111111111111');
+
+    let finishReqA!: () => void;
+    const reqAReady = new Promise<void>((resolve) => {
+      finishReqA = resolve;
+    });
+
+    const runA = new Promise<void>((resolve, reject) => {
+      middleware(reqA, resA, () => {
+        void (async () => {
+          await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+            await retrieve();
+            notePromptAttributes(getCurrentSpan()?.context?.traceId, { 'traccia.prompt.name': 'rag-prompt' });
+            await readCustomer({ customer_id: 'cust-1' });
+            await reqAReady;
+            await enforceLlmCall({ model: 'gpt-4o-mini' });
+          });
+        })().then(resolve, reject);
+      });
+    });
+
+    // Wait one tick so A has stored its evidence and holds its local root open
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Request B replays the exact same traceparent traceId, performs NO retrieval, and checks policy concurrently
+    await new Promise<void>((resolve, reject) => {
+      middleware(reqB, resB, () => {
+        void (async () => {
+          await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+            await enforceLlmCall({ model: 'gpt-4o-mini' });
+            await updateCustomer({ customer_id: 'cust-1' });
+          });
+        })().then(resolve, reject);
+      });
+    });
+
+    finishB();
+
+    const llmChecksBeforeAFinishes = post.mock.calls
+      .map((call) => call[1] as { action: { type: string }; context: { retrieval?: unknown; prompt?: unknown; freshness?: unknown } })
+      .filter((body) => body.action.type === 'llm_call');
+    expect(llmChecksBeforeAFinishes).toHaveLength(1);
+    expect(llmChecksBeforeAFinishes[0].context.retrieval).toEqual({ present: false });
+    expect(llmChecksBeforeAFinishes[0].context.prompt).toBeUndefined();
+
+    const writeCheckB = post.mock.calls
+      .map((call) => call[1] as CheckBody)
+      .find((body) => body.action.name === 'update_customer');
+    expect(writeCheckB?.context.freshness).toBeUndefined();
+
+    // Now finish Request A: A still has its own evidence, and drops it on remote-root completion
+    finishReqA();
+    await runA;
+    finishA();
+
+    expect([retrievalByTrace.size, promptByTrace.size, lastReads.size]).toEqual([0, 0, 0]);
+
+    const llmChecks = post.mock.calls
+      .map((call) => call[1] as { action: { type: string }; context: { retrieval?: unknown; prompt?: unknown } })
+      .filter((body) => body.action.type === 'llm_call');
+    expect(llmChecks[1].context.retrieval).toEqual({ present: true, chunk_count: 7 });
+    expect(llmChecks[1].context.prompt).toEqual({ name: 'rag-prompt' });
+
+    // Sequential Request C replaying the same traceId also sees no stale retrieval
+    const { req: reqC, res: resC, finish: finishC } = makeReqRes('2222222222222222');
+    await new Promise<void>((resolve, reject) => {
+      middleware(reqC, resC, () => {
+        void (async () => {
+          await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+            await enforceLlmCall({ model: 'gpt-4o-mini' });
+          });
+        })().then(resolve, reject);
+      });
+    });
+    finishC();
+
+    const thirdLlmCheck = post.mock.calls
+      .map((call) => call[1] as { action: { type: string }; context: { retrieval?: unknown } })
+      .filter((body) => body.action.type === 'llm_call')[2];
+    expect(thirdLlmCheck.context.retrieval).toEqual({ present: false });
+  });
+
+  it('drops evidence on remote-root completion and isolates replayed traceparent headers in Fastify outside govern()', async () => {
+    const hooks: Record<string, (req: any, reply: any, done: () => void) => void> = {};
+    const mockFastify: any = {
+      addHook: jest.fn((name: string, handler: (req: any, reply: any, done: () => void) => void) => {
+        hooks[name] = handler;
+      }),
+    };
+    const plugin = fastifyPlugin();
+    plugin(mockFastify, {}, () => {});
+
+    const sharedTraceId = '778899aabbccddeeff00112233445566';
+    const retrieve = observe({ name: 'retrieve' })(async () => {
+      getCurrentSpan()?.setAttribute('traccia.retrieval.chunk_count', 7);
+    });
+
+    const reqA: any = {
+      method: 'POST',
+      url: '/fastify-chat',
+      headers: { traceparent: `00-${sharedTraceId}-aaaaaaaaaaaaaaaa-01` },
+    };
+    await new Promise<void>((resolve, reject) => {
+      hooks.onRequest(reqA, {}, () => {
+        void (async () => {
+          await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+            await retrieve();
+            notePromptAttributes(getCurrentSpan()?.context?.traceId, { 'traccia.prompt.name': 'fastify-prompt' });
+            await readCustomer({ customer_id: 'cust-1' });
+          });
+        })().then(resolve, reject);
+      });
+    });
+    hooks.onResponse(reqA, { statusCode: 200 }, () => {});
+    expect([retrievalByTrace.size, promptByTrace.size, lastReads.size]).toEqual([0, 0, 0]);
+
+    const reqB: any = {
+      method: 'POST',
+      url: '/fastify-chat',
+      headers: { traceparent: `00-${sharedTraceId}-aaaaaaaaaaaaaaaa-01` },
+    };
+    await new Promise<void>((resolve, reject) => {
+      hooks.onRequest(reqB, {}, () => {
+        void (async () => {
+          await runIdentity({ agentId: 'support', pepEnabled: true }, async () => {
+            await enforceLlmCall({ model: 'gpt-4o-mini' });
+            await updateCustomer({ customer_id: 'cust-1' });
+          });
+        })().then(resolve, reject);
+      });
+    });
+    hooks.onResponse(reqB, { statusCode: 200 }, () => {});
+
+    const llmBody = post.mock.calls
+      .map((call) => call[1] as { action: { type: string }; context: { retrieval?: unknown; prompt?: unknown } })
+      .find((body) => body.action.type === 'llm_call');
+    expect(llmBody?.context.retrieval).toEqual({ present: false });
+    expect(llmBody?.context.prompt).toBeUndefined();
+
+    const writeBody = post.mock.calls
+      .map((call) => call[1] as CheckBody)
+      .find((body) => body.action.name === 'update_customer');
+    expect(writeBody?.context.freshness).toBeUndefined();
   });
 });

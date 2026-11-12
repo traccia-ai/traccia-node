@@ -5,7 +5,9 @@
  */
 
 import { getTracer } from '../auto';
-import { SpanStatus, ISpan } from '../types';
+import { SpanStatus, ISpan, ISpanContext } from '../types';
+import { extractHttpHeaders } from '../context';
+import { runWithSpan } from '../context/context';
 
 /**
  * Express-compatible request object.
@@ -111,7 +113,19 @@ export function expressMiddleware(
             spanName?.(req) ||
             `${req.method} ${req.route?.path || path}`;
 
-        const span = tracer.startSpan(name);
+        let parentContext: ISpanContext | undefined;
+        if (req.headers) {
+            parentContext = extractHttpHeaders(req.headers as Record<string, string>) || undefined;
+        }
+
+        const span = parentContext
+            ? tracer.startSpan(name, { parentContext })
+            : tracer.startSpan(name);
+
+        span.isLocalRoot = true;
+        if (span.context?.spanId) {
+            span.localRootSpanId = span.context.spanId;
+        }
 
         // Set basic attributes
         span.setAttribute('span.type', 'TOOL');
@@ -177,7 +191,9 @@ export function expressMiddleware(
             }
         });
 
-        next();
+        runWithSpan(span, () => {
+            next();
+        });
     };
 }
 
@@ -204,8 +220,11 @@ export function expressErrorMiddleware(): (
             span.recordException(error);
             span.status = SpanStatus.ERROR;
             span.statusDescription = error.message;
+            runWithSpan(span, () => {
+                next(error);
+            });
+        } else {
+            next(error);
         }
-
-        next(error);
     };
 }
