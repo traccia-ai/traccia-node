@@ -51,6 +51,10 @@ export interface TracciaRuntime {
   started: boolean;
   taskChildCosts?: import('async_hooks').AsyncLocalStorage<Array<{ cost: number | null }>>;
   costProvider?: TracerProvider | null;
+  /** The teardown stopTracing() is running, shared by concurrent callers. */
+  stopping?: Promise<void> | null;
+  /** Exit and signal hooks are installed (once per process, across bundles). */
+  exitHooksInstalled?: boolean;
 }
 
 /** One process shares this object across the CLI bundle and the public SDK. */
@@ -105,6 +109,12 @@ function applyGovernanceConfig(config: SDKConfig): void {
 }
 
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
+  // A stopTracing() still running would otherwise leave started=true and hand back the
+  // provider it is shutting down.
+  const stopping = runtimeState().stopping;
+  if (stopping != null) {
+    await stopping.catch(() => undefined);
+  }
   if (runtimeState().started) {
     // Tracing stays as it is, but policy checks start afresh (TRC-342): no
     // remembered fail mode, and this call's policyFailMode applies.
@@ -323,7 +333,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   });
 
   provider.addSpanProcessor(processor);
-  registerShutdown(provider, processor);
+  installExitHooks();
 
   if (loadedConfig.instrumentation.enable_patching !== false) {
     try {
@@ -349,50 +359,133 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 }
 
 /**
- * Stop tracing and shutdown all processors.
+ * Stop tracing and shutdown all processors. Concurrent calls (an explicit call racing the exit
+ * or signal hook) share one teardown, so spans are exported and the exporter shut down once.
  */
 export async function stopTracing(): Promise<void> {
-  clearClientConfig();
   const state = runtimeState();
-  if (!state.provider) {
+  if (state.stopping != null) {
+    return state.stopping;
+  }
+  clearClientConfig();
+  const provider = state.provider;
+  if (!provider) {
     return;
   }
 
-  await state.provider.shutdown();
-  state.started = false;
-  state.provider = null;
-  state.costProvider = null;
+  state.stopping = (async (): Promise<void> => {
+    try {
+      await provider.shutdown();
+    } finally {
+      // Clear even if shutdown failed, so the exit hook cannot retry it in a loop. Tracing is
+      // stopped either way; a provider set with setTracerProvider() meanwhile stays in place.
+      state.started = false;
+      if (state.provider === provider) {
+        state.provider = null;
+        state.costProvider = null;
+      }
+      state.stopping = null;
+    }
+  })();
+  return state.stopping;
 }
 
 /**
- * Register shutdown hooks.
+ * Install the process hooks that flush spans when the app did not call stopTracing():
+ * - beforeExit: the event loop ran out of work (a script or job finishing normally). The batch
+ *   timer is unref'ed, so without this the queued spans are dropped. beforeExit fires again
+ *   once the export's I/O finishes; by then the provider is gone, so the hook does nothing.
+ *   An export that cannot finish (an unreachable endpoint being retried) keeps the process
+ *   alive, so after EXIT_FLUSH_TIMEOUT_MS the process exits with the app's process.exitCode.
+ * - SIGINT/SIGTERM: flush (up to the same deadline), then terminate (see terminateAfterSignal).
+ * Each hook acts on the provider current at that moment, not the one from the first init().
+ * Not covered: process.exit() and frozen serverless runtimes, which skip beforeExit; those
+ * apps must await stopTracing() themselves.
  */
-function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcessor): void {
-  if (_registeredShutdown) {
+function installExitHooks(): void {
+  const state = runtimeState();
+  if (state.exitHooksInstalled) {
     return;
   }
+  state.exitHooksInstalled = true;
 
-  const shutdown = async (): Promise<void> => {
-    try {
-      await provider.shutdown();
-    } catch {
-      // Silently fail
+  let exitTimer: NodeJS.Timeout | undefined;
+  process.on('beforeExit', () => {
+    if (!runtimeState().provider) {
+      return;
     }
-  };
+    const stopped = stopTracing().catch(() => undefined);
+    if (exitTimer !== undefined) {
+      return;
+    }
+    // Unreferenced: it never keeps the process alive by itself, but still fires while a stuck
+    // export does. process.exit() with no code exits with process.exitCode, as a natural exit would.
+    exitTimer = setTimeout(() => process.exit(), EXIT_FLUSH_TIMEOUT_MS);
+    exitTimer.unref();
+    stopped
+      .then(() => {
+        clearTimeout(exitTimer);
+        exitTimer = undefined;
+      })
+      .catch(() => undefined);
+  });
 
-  // eslint-disable-next-line @typescript-eslint/no-misused-promises
-  process.on('SIGTERM', shutdown);
-  // eslint-disable-next-line @typescript-eslint/no-misused-promises
-  process.on('SIGINT', shutdown);
-  _registeredShutdown = true;
+  let flushing = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (flushing) {
+      // A second Ctrl+C while the flush is still running (a slow or hung exporter): stop waiting.
+      terminateAfterSignal(signal, onSignal);
+      return;
+    }
+    flushing = true;
+    // shutdown() drains without a deadline, so bound it here: a hung export must not keep a
+    // signalled process alive. The timer stays referenced so it fires even with no other work.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, EXIT_FLUSH_TIMEOUT_MS);
+    });
+    Promise.race([stopTracing().catch(() => undefined), deadline])
+      .then(() => {
+        clearTimeout(timer);
+        flushing = false;
+        terminateAfterSignal(signal, onSignal);
+      })
+      .catch(() => undefined);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+}
+
+/**
+ * How long an exiting process (natural exit or SIGINT/SIGTERM) waits for spans to export
+ * before it ends anyway. A reachable collector takes well under a second; an unreachable one
+ * would otherwise hold the process for the exporter's full retry schedule (10-17 s).
+ */
+const EXIT_FLUSH_TIMEOUT_MS = 5000;
+
+/**
+ * Called once a SIGINT/SIGTERM-triggered flush has finished. `listener` is the SDK's own
+ * handler for that signal. Registering any listener replaces Node's default action for a
+ * signal (terminate), so unless something restores it the process keeps running.
+ *
+ * If the app has its own handler for the signal (a server draining connections, the CLI's eval
+ * interrupt), it owns termination and the SDK leaves it alone. Otherwise the SDK removes its
+ * listener and re-raises the signal, so Node's default applies and the process dies *by the
+ * signal* (what shells, systemd and Kubernetes expect), not with an invented exit code.
+ */
+function terminateAfterSignal(signal: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): void {
+  const others = process.listeners(signal).filter((l) => l !== listener);
+  if (others.length > 0) {
+    return;
+  }
+  process.removeListener(signal, listener);
+  process.kill(process.pid, signal);
 }
 
 /**
  * Alias for backwards compatibility.
  */
 export const startTracing = init;
-
-let _registeredShutdown = false;
 
 /**
  * Composite exporter combining multiple exporters.
