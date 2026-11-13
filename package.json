@@ -1,7 +1,7 @@
 {
   "name": "@traccia/sdk",
   "version": "0.1.20",
-  "description": "Tracing SDK for agent applications",
+  "description": "AI agent control plane SDK: trace, evaluate and govern AI agents with OpenTelemetry, and stop bad LLM and tool calls before they run",
   "main": "dist/index.js",
   "bin": {
     "traccia-ts": "dist/cli.js"

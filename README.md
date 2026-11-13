@@ -1,400 +1,274 @@
-# Traccia SDK for Javascript/TypeScript
+<div align="center">
 
-[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
-[![NPM Version](https://img.shields.io/npm/v/@traccia/sdk.svg?style=flat-square)](https://www.npmjs.com/package/@traccia/sdk)
-[![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg?style=flat-square)](https://www.typescriptlang.org/)
-[![Socket Badge](https://badge.socket.dev/npm/package/@traccia/sdk)](https://badge.socket.dev/npm/package/@traccia/sdk)
-[![Snyk](https://img.shields.io/badge/Snyk-0%20Vulnerabilities-success?style=flat-square&logo=snyk)](https://security.snyk.io/package/npm/%40traccia%2Fsdk)
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://traccia.ai/Traccia%20logo%20white%20-transparent-.png">
+    <img src="https://traccia.ai/Traccia%20logo%20blue%20-transparent-.png" alt="Traccia" width="300">
+  </picture>
+</h1>
 
-**Production-ready distributed tracing for AI agents and LLM applications**
+**The AI agent control plane. Observe, evaluate, govern and prove what your agents do.**
 
-Traccia is a lightweight, high-performance Javascript/TypeScript SDK for observability, evaluation, and tracing of AI agents, LLM applications, and complex distributed systems. Built on OpenTelemetry standards with specialized instrumentation for AI workloads.
+An open-source TypeScript and JavaScript SDK for tracing, evaluations, prompt management, and runtime governance, built on OpenTelemetry.
 
----
+[![npm](https://img.shields.io/npm/v/@traccia/sdk)](https://www.npmjs.com/package/@traccia/sdk)
+[![Downloads](https://img.shields.io/npm/dm/@traccia/sdk)](https://www.npmjs.com/package/@traccia/sdk)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/traccia-ai/traccia-node?style=social)](https://github.com/traccia-ai/traccia-node/stargazers)
 
-## Features
+[Docs](https://traccia.ai/docs/) · [Quickstart](https://traccia.ai/docs/sdk/quickstart/) · [Python SDK](https://github.com/traccia-ai/traccia-py) · [Free account](https://app.traccia.ai/) · [Changelog](CHANGELOG.md)
 
-- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (`@google/genai`), LangChain support.
-- **LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically.
-- **Zero-Config Start**: Simple `startTracing()` call with automatic config discovery.
-- **Decorator-Based**: Trace any function with the `@observe` decorator.
-- **Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin) and Console exporters.
-- **Production-Ready**: Rate limiting, typed errors, config validation, robust flushing.
-- **Type-Safe**: Full TypeScript support with `TracciaError` hierarchy.
-- **High Performance**: Efficient batching, async support, minimal overhead.
-- **W3C Trace Context**: Native distributed tracing header propagation.
-- **Governance & Policies**: Trace evidence, `disclosure()`, and `govern()` which can deny or reshape this LLM or tool call (Spend Cap, Model Boundary, Loop Cap) against the Traccia platform. Refund Guard and Purchase Guard can also hold a tool for a person (`ApprovalPending`).
-- **Agent Identity**: Centralized configuration mapping to OTel resource attributes.
-- **Prompt Management**: `loadPrompt` / `prefetchPrompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity.
-- **Offline Evaluation**: `evaluate()` runs a task and scorers over a dataset and saves an experiment you can open, compare, and attach on promote.
+</div>
 
----
+- **Observe.** `init()` traces every OpenAI, Anthropic and Gemini call, with tokens and cost on each span. Send traces to Traccia or to any OTLP backend.
+- **Evaluate.** Score your agent on a dataset with `evaluate()`, locally or as a saved experiment, and fail a pull request when quality falls or cost or latency goes over your limit. Version prompts and load them at runtime.
+- **Govern.** Check each LLM and tool call before it runs: stop an agent that overspends, loops or calls the wrong tool.
+- **Prove.** Keep evidence for the EU AI Act and HIPAA in the Compliance Hub.
 
-## Quick Start
+<p align="center">
+  <img src="https://traccia.ai/docs/Trace_detail.png" alt="One agent run in Traccia: duration, cost, tokens, LLM and tool calls, and the span timeline" width="900">
+  <br>
+  <em>One agent run in Traccia: cost, tokens, every LLM and tool call, and how long each took.</em>
+</p>
 
-### Installation
+<!-- TODO: 20 to 30 second GIF here. An agent loops on a tool, Loop Cap blocks the next call, and the trace in Traccia shows which policy fired and why. -->
+
+## Quickstart
+
+No Traccia account needed. You need an OpenAI API key for this example.
+
+**1. Install**
 
 ```bash
-npm install @traccia/sdk
+npm init -y
+npm install @traccia/sdk openai
+npm install -D tsx
+export OPENAI_API_KEY="sk-..."
 ```
 
-### Basic Usage
+**2. Trace your first call**
 
-Initialize the SDK and trace your application functions using decorators.
+Save this as `index.ts`:
 
 ```typescript
-import { Traccia, observe } from '@traccia/sdk';
+import OpenAI from 'openai';
+import { init, observe, stopTracing } from '@traccia/sdk';
 
-// Initialize (auto-loads from traccia.toml or env vars if present)
-await Traccia.init();
+const client = new OpenAI(); // patched by init()
 
-// Trace any function
-class Service {
-  @observe()
-  async doWork(input: string) {
-    return `Processed: ${input}`;
-  }
+const answer = observe({ name: 'answer' })(async (question: string) => {
+  const resp = await client.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: question }],
+  });
+  return resp.choices[0].message.content;
+});
+
+async function main() {
+  await init({ useOtlp: false, enableConsoleExporter: true }); // print spans in your terminal
+  // await init({ endpoint: 'http://localhost:4318/v1/traces' }); // or send them to Jaeger, Tempo, SigNoz...
+  // await init(); // or to Traccia: set TRACCIA_API_KEY from app.traccia.ai
+
+  console.log(await answer('What is OpenTelemetry?'));
+  await stopTracing(); // flush spans before the process exits
 }
 
-const service = new Service();
-await service.doWork('hello');
+main();
 ```
 
-### Load a versioned prompt
-
-Fetch prompts from your Traccia library by name and deploy label. Compiling fills `{{variables}}` and stamps the active span with prompt identity.
-
-```typescript
-import { init, observe, loadPrompt, prefetchPrompts } from '@traccia/sdk';
-
-await init({ apiKey: '...', promptCacheTtlS: 60 });
-await prefetchPrompts(['support-reply']); // optional warm-up
-
-const reply = observe({ type: 'llm' })(async (question: string) => {
-  const prompt = await loadPrompt({
-    name: 'support-reply',
-    label: 'production',
-    fallback: {
-      type: 'chat',
-      messages: [{ role: 'system', content: 'You are a helpful assistant.' }],
-    },
-  });
-  const messages = prompt.compile({ question });
-  // pass messages to your LLM client
-  return messages;
-});
+```bash
+npx tsx index.ts
 ```
 
-Requires the [Traccia platform](https://app.traccia.ai): create a workspace API key under **Settings → API Keys**. Tracing and prompt fetch use the same key and default to `https://api.traccia.ai`. Pass an explicit `fallback` so agents can still run if a fetch fails. See [Prompts in the SDK](https://traccia.ai/docs/sdk/prompts).
+**3. See the trace**
 
-### Run an experiment
+Each LLM span records the model, tokens, cost, prompt, completion and latency. It prints in your terminal, shows up in your OTLP backend ([Jaeger](https://traccia.ai/docs/guides/local-jaeger/), [Grafana](https://traccia.ai/docs/guides/local-grafana/)), or appears under **Traces** in Traccia like the run above.
 
-`evaluate()` runs a task and scorers over a dataset. By default the run is saved as an experiment you can open in the app under **Evaluate → Experiments**, compare against other runs, and attach when you promote a prompt. Use the same workspace API key as tracing and `loadPrompt`.
+## Evaluate your agent
+
+Run your agent over a small dataset and score every answer. This runs locally, with no Traccia account. Add it to `main()` in `index.ts`, before `stopTracing()`:
 
 ```typescript
-import { init, evaluate, loadPrompt } from "@traccia/sdk";
+import { evaluate } from '@traccia/sdk';
 
-await init({ apiKey: "..." });
-
-const prompt = await loadPrompt({ name: "support-reply", label: "production" });
-
+// in main(), after init():
 const result = await evaluate({
-  name: "support-reply-v3",
-  data: "support-golden", // platform dataset name or UUID
-  task: async (inp) => {
-    const messages = prompt.compile(inp);
-    return callModel(messages);
-  },
-  scorers: ["exact_match"], // builtins, platform names/ids, or functions
-  prompt: "support-reply",  // labels the experiment cell with this prompt
+  name: 'trivia-check',
+  data: [
+    { input: { question: 'What is the capital of France?' }, expected: 'Paris' },
+    { input: { question: 'What is 12 * 12?' }, expected: '144' },
+    { input: { question: 'Who wrote Hamlet?' }, expected: 'Shakespeare' },
+  ],
+  task: async (input) => answer(input.question as string), // answer() from the quickstart
+  scorers: ['contains'], // also exact_match, json_valid, or your own function
+  persist: false,        // keep it local
 });
 console.log(result.summary());
-console.log(result.url);
 ```
 
-- **Persist is on by default.** Set `persist: false` for a local-only loop (no experiment URL).
-- **Inline rows** work as `[{ input: { ... }, expected: "..." }]`. With persist on, Traccia still saves a full experiment (helper datasets named `sdk-eval/...` are hidden on **Evaluate → Datasets** unless you turn on **Show SDK-Created**).
-- **Builtins** run in-process: `exact_match`, `contains`, `json_valid`. Mix in platform scorers (LLM-as-judge, Jev Decision, code) by name or UUID. Pass `providerKeys` for judges (`typesafe` for Jev). A Jev score keeps each question on the experiment.
-- **One throwing row does not abort the run.** That cell records `error`; other items still score. Configuration and API failures raise `EvaluateError`.
-- The task always receives the row's `input` object only. Wrapper fields are camelCase (`experimentId`, `persistError`); row payloads stay snake_case.
+If one of the three answers misses, it prints:
 
-See [Evaluate in the SDK](https://traccia.ai/docs/sdk/evaluate) and the walkthrough [Run Experiments From Code](https://traccia.ai/docs/guides/sdk-evaluate).
-
-### Run evals in CI
-
-`traccia-ts eval` runs a module that exports `task`, saves an experiment, and writes `summary.json`. Exit codes match the Python CLI: 0 pass, 1 quality miss, 2 bad command or baseline, 3 untrustworthy evidence, 4 the experiment did not save, 5 the summary file was not written. With no pass-rate bar, a green check is Execution Only: no pass-rate gate, while cost and latency gates can still apply. `--max-drop 0.05` is five percentage points. A function in the module is `export const scorers = { name }` and `--scorer local:name`. A local scorer cannot pass `--max-drop`. Pass `--prompt` with `--prompt-version` or `--prompt-label` when the experiment should record a prompt version. Platform LLM-judge and Jev scorers read `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `GROQ_API_KEY`, and `TYPESAFE_API_KEY`, or a JSON object in `TRACCIA_PROVIDER_KEYS`. Each Jev question is gated on its own pass rate. Load `.ts` task files with `tsx`.
-
-```bash
-traccia-ts eval experiments/support_agent.mjs \
-  --output summary.json \
-  --dataset support-golden \
-  --scorer exact_match \
-  --min-pass-rate 0.9
+```text
+Experiment: trivia-check
+Items: 3
+Pass rate: 0.6666666666666666
+Scored: 3
+Errors: 0
+Persisted: no (local-only)
 ```
 
-See [Run Evals In CI](https://traccia.ai/docs/guides/ci-evals).
+Drop `persist: false` and the run is saved as an experiment in Traccia, where you can compare it with the last run side by side and score with an LLM judge. In CI, `traccia-ts eval` fails the job when quality, cost or latency misses the bar you set ([CI evals](https://traccia.ai/docs/guides/ci-evals/), [GitHub Action](https://github.com/traccia-ai/traccia-eval-action)). More: [Evaluate](https://traccia.ai/docs/sdk/evaluate/).
 
-### Integration with LLMs (LangChain)
+## Version your prompts
 
-Seamlessly integrate with LangChain to automatically track model usage, tokens, and latency.
+Keep prompts in the Traccia prompt registry, where each version is fixed once saved and the `production` label marks the one to serve. Your code loads whatever version holds the label:
 
 ```typescript
-import { Traccia, observe } from '@traccia/sdk';
-import { ChatOpenAI } from '@langchain/openai';
-import { TracciaCallbackHandler } from '@traccia/sdk/integrations';
+import { loadPrompt } from '@traccia/sdk';
 
-await Traccia.init();
-
-const model = new ChatOpenAI({
-  modelName: 'gpt-4',
-  callbacks: [new TracciaCallbackHandler()],
+// in an async function, after init():
+const prompt = await loadPrompt({
+  name: 'support-reply',
+  label: 'production',
+  fallback: { type: 'chat', messages: [ // used if Traccia can't be reached
+    { role: 'system', content: 'You answer billing questions for {{company}}.' },
+    { role: 'user', content: '{{question}}' },
+  ] },
 });
-
-@observe({ type: 'llm' })
-async function generateText(prompt: string) {
-  const res = await model.invoke(prompt);
-  return res.content;
-}
-
-// Automatically tracks: model, tokens, cost, prompt, completion, latency
-const text = await generateText("Write a haiku about TypeScript");
+const messages = prompt.compile({ company: 'Acme', question: 'Why was I charged twice?' });
 ```
 
-### Gemini (`@google/genai`)
+`compile()` fills in the `{{variables}}` and records the prompt name and version on the current span, so each trace shows which prompt produced it. Prompts are cached, and the fallback keeps your agent running, with a warning in the log, if the registry is out of reach. More: [Prompts](https://traccia.ai/docs/sdk/prompts/).
 
-Wrap `client.interactions.create` to trace the Gemini **Interactions API** (`@google/genai` `>=2.9.0`, tested against `2.17.1`). This is the only Gemini surface instrumented today — `models.generateContent` is not covered.
+## Stop a runaway agent
+
+`observe()` records what happened. `govern()` also decides whether the next call is allowed to happen. Policies live in the Traccia app, so you can change a limit without a deploy.
+
+```mermaid
+flowchart LR
+    A["Your agent<br/>(govern)"] --> B{"Policy check<br/>before the call"}
+    B -->|Allow| C["LLM or tool runs"]
+    B -->|Reshape| D["Runs on a cheaper model<br/>or with fewer tokens"]
+    B -->|Deny| E["AgentBlockedError<br/>provider never called"]
+    B -->|Hold| F["ApprovalPending thrown<br/>approval queued"]
+    C --> G["Spans over OTLP"]
+    D --> G
+    G --> H["Traccia"]
+    G --> I["Or any OTLP backend:<br/>Tempo, Jaeger, Zipkin, SigNoz"]
+```
+
+In the [Traccia app](https://app.traccia.ai/), create a **Loop Cap** policy with a maximum of 3 tool calls per run, set it to **Block**, and copy your API key.
 
 ```typescript
-import { Traccia, wrapGeminiInteractionsCreate } from '@traccia/sdk';
-import { GoogleGenAI } from '@google/genai';
+import { init, observe, govern, stopTracing, AgentBlockedError } from '@traccia/sdk';
 
-await Traccia.init();
-
-const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-client.interactions.create = wrapGeminiInteractionsCreate(
-  client.interactions.create.bind(client.interactions),
-  client.interactions,
+const webSearch = observe({ name: 'web_search', asType: 'tool' })(
+  async (query: string) => `results for ${query}`,
 );
 
-const response = await client.interactions.create({
-  model: 'models/gemini-2.5-flash',
-  input: 'Write a haiku about TypeScript',
+const runAgent = govern({ name: 'run_agent' })(async (topic: string) => {
+  while (true) { // a bug: the agent never decides it has enough
+    await webSearch(topic);
+  }
 });
+
+async function main() {
+  await init({ apiKey: '...', agentId: 'research-agent' }); // API key from app.traccia.ai
+  try {
+    await runAgent('agent observability');
+  } catch (err) {
+    if (!(err instanceof AgentBlockedError)) throw err;
+    // The 4th search is denied before it runs.
+    console.log(err.reasons, err.decisionId);
+  }
+  await stopTracing();
+}
+
+main();
 ```
 
-Captures `llm.model`, `llm.prompt`, `llm.completion`, `llm.previous_interaction_id` (multi-turn), and token usage read directly from the provider's `usage.total_*` fields (`total_input_tokens`, `total_output_tokens`, `total_thought_tokens`, `total_cached_tokens`, `total_tool_use_tokens`, `total_tokens`) — never synthesized from input+output, so thinking/cache/tool tokens aren't dropped.
+The same wrapper runs the other policies, for example:
 
-**Streaming (`stream: true`)**: the span is still created and ends with request attributes (`llm.streaming: true`), but usage/completion population is intentionally skipped — `create()` resolves with a `Stream` object almost immediately, before the model has produced output, so populating from it would record a near-zero duration and no usage data.
+- [Spend Cap](https://traccia.ai/docs/platform/policies/spend-cap/) stops a model call that would go over your USD budget, or moves it to a cheaper model.
+- [Refund Guard](https://traccia.ai/docs/platform/policies/refund-guard/) stops a refund over your limit. For a middle amount, `govern()` throws `ApprovalPending` and queues the request for a person to approve.
+- [High-Risk Tool](https://traccia.ai/docs/platform/policies/high-risk-tool/) stops a tool you name, such as `delete_account`.
 
----
+See [all policies](https://traccia.ai/docs/platform/policies/). Each one runs in Observe (log a match), Warn (alert) or Block (stop the call) mode, so you can watch what a policy would stop before you turn it on.
 
-## Configuration
+If Traccia can't be reached, the check blocks the call by default. You can let calls through instead under **Settings → Policy Enforcement**, or locally with `init({ policyFailMode: 'open' })`. Without an API key or agent ID, `govern()` throws `GovernanceConfigError` instead of running unchecked. See [Governance in the SDK](https://traccia.ai/docs/sdk/governance/).
 
-### Configuration File
+### Can't add the SDK? Use the Gateway
 
-Create a `traccia.toml` file in your project root using the CLI:
+For an agent you can't change, such as a closed-source tool or an n8n workflow, point its OpenAI, Anthropic or Gemini client at the [Traccia Gateway](https://traccia.ai/docs/platform/gateway/): change the base URL and add two Traccia headers. You keep your own provider key. The Gateway checks each model call, but it can't see tools or the rest of the run:
+
+| | SDK (`govern()`) | Gateway |
+|---|---|---|
+| Spend Cap, Model Boundary | Yes | Yes |
+| Loop Cap, tool guards (Refund Guard, High-Risk Tool, ...), Prompt Pin and the other SDK-only policies | Yes | No |
+| What the trace shows | The whole run: tools, nested steps, every call | One span per model call |
+
+Use one or the other for a given call, not both. Guides for the [Vercel AI SDK](https://traccia.ai/docs/platform/gateway/vercel-ai-sdk/), [LiteLLM](https://traccia.ai/docs/platform/gateway/litellm/), [n8n](https://traccia.ai/docs/platform/gateway/n8n/) and more are in the Gateway docs.
+
+## Works with
+
+- **Model SDKs, patched automatically:** OpenAI (Chat Completions and Responses), Anthropic, Gemini (`@google/genai` Interactions API)
+- **Agent frameworks:** [LangChain](https://traccia.ai/docs/integrations/langchain/) and LangGraph, [OpenAI Agents SDK](https://traccia.ai/docs/integrations/openai-agents/)
+- **HTTP:** Express and Fastify middleware, `fetch` and axios, with W3C trace context across services
+- **Coding agents, traced without the SDK:** [Claude Code](https://traccia.ai/docs/integrations/claude-code/), [Cursor](https://traccia.ai/docs/integrations/cursor/), [GitHub Copilot](https://traccia.ai/docs/integrations/github-copilot/)
+- **Any OTLP backend:** Grafana Tempo, Jaeger, Zipkin, SigNoz ([exporters](https://traccia.ai/docs/sdk/exporters/))
+
+## What needs an account
+
+| | Without an account | With a Traccia account |
+|---|---|---|
+| Tracing, to the console or any OTLP backend | Yes | Yes, plus the Traccia app |
+| Local evals with `evaluate({ persist: false })` | Yes | Yes |
+| Saved experiments, comparisons, LLM-judge scorers | No | Yes |
+| Prompt registry (`loadPrompt`) | Fallback only | Yes |
+| Runtime policies (`govern()`) | No | Yes |
+| The Gateway, human approval, the Compliance Hub | No | On paid plans |
+
+There is a free plan. See [pricing](https://traccia.ai/pricing/).
+
+## Docs
+
+| Topic | Where |
+|---|---|
+| Install and first trace | [Quickstart](https://traccia.ai/docs/sdk/quickstart/) |
+| `observe()`, spans, async, errors | [The observe decorator](https://traccia.ai/docs/sdk/observe-decorator/) |
+| `evaluate()`, scorers and experiments | [Evaluate](https://traccia.ai/docs/sdk/evaluate/) |
+| `loadPrompt` and the prompt registry | [Prompts](https://traccia.ai/docs/sdk/prompts/) |
+| `govern()`, policy checks, fail mode | [Governance in the SDK](https://traccia.ai/docs/sdk/governance/) |
+| Guardrail detection | [Guardrails](https://traccia.ai/docs/sdk/guardrails/) |
+| Cost estimation and pricing overrides | [Pricing](https://traccia.ai/docs/sdk/pricing/) |
+| OpenTelemetry metrics | [Metrics](https://traccia.ai/docs/sdk/metrics/) |
+| Multi-agent services | [Multi-agent](https://traccia.ai/docs/guides/multi-agent/) |
+| `traccia.toml` and environment variables | [Configuration](https://traccia.ai/docs/reference/configuration/) |
+| `traccia-ts config`, `eval` and the other commands | [CLI](https://traccia.ai/docs/reference/cli/) |
+| Full API | [Node.js SDK reference](https://traccia.ai/docs/reference/node-sdk/) |
+| Something not working | [Troubleshooting](https://traccia.ai/docs/guides/troubleshooting/) |
+| Docs for your coding agent | [traccia.ai/llms.txt](https://traccia.ai/llms.txt) |
+
+## Contributing
+
+Bug fixes, integrations and examples are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and open an [issue](https://github.com/traccia-ai/traccia-node/issues) first for anything large.
 
 ```bash
-npx traccia-ts config init
+git clone https://github.com/traccia-ai/traccia-node.git
+cd traccia-node
+npm install
+npm run build
+npm test
 ```
 
-This creates a template config file with the following structure:
+If Traccia caught a bad call for you, a star helps other people find it.
 
-```toml
-[tracing]
-# Endpoint URL for OTLP trace ingestion (Traccia platform default)
-endpoint = "https://api.traccia.ai/v2/traces"
-
-# Flush interval for batching spans (in ms)
-flush_interval = 5000
-
-# Maximum size of span batch before forced flush
-batch_size = 512
-
-[agent]
-# Name of the agent emitting traces
-name = "my-typescript-agent"
-
-# Type of the agent (e.g., 'workflow', 'llm', 'retriever')
-type = "workflow"
-
-# Environment (e.g., 'development', 'staging', 'production')
-env = "development"
-
-# Project this agent belongs to
-project = "my-default-project"
-
-[integrations]
-# Enable/disable specific integrations
-langchain = true
-openai = true
-gemini = true
-```
-
-### Environment Variables
-
-Configuration can also be provided via standard environment variables:
-
-- `TRACCIA_API_KEY`: API Key for ingestion authentication.
-- `TRACCIA_ENDPOINT`: The OTLP endpoint (default: `https://api.traccia.ai/v2/traces`).
-- `TRACCIA_AGENT_NAME`: The name of the agent tracing execution.
-- `TRACCIA_ENV`: The environment (e.g., `development`, `production`).
-
----
-
-## Advanced Usage
-
-### Custom Traces and Attributes
-
-You can manually trace components and add custom business metrics to spans:
-
-```typescript
-import { trace } from '@opentelemetry/api';
-import { observe } from '@traccia/sdk';
-
-class DataPipeline {
-  @observe({ type: 'retriever', name: 'fetch_user_data' })
-  async fetchData(userId: string) {
-    const activeSpan = trace.getActiveSpan();
-    
-    // Add custom business metrics
-    activeSpan?.setAttribute('app.user.id', userId);
-    activeSpan?.setAttribute('db.query.latency', 45);
-    
-    return { id: userId, status: 'active' };
-  }
-}
-```
-
-### Stopping the SDK
-
-To ensure all queued telemetry data is successfully flushed to the backend before the process exits, invoke `stopTracing()`:
-
-```typescript
-import { stopTracing } from '@traccia/sdk';
-
-// Flush buffered spans and shut down the provider safely
-await stopTracing();
-```
-
-### `evaluate()` options
-
-`evaluate()` is async and takes one options object. Also available as `Traccia.evaluate`.
-
-| Option | Notes |
-|--------|--------|
-| `name` | Experiment name (required) |
-| `data` | Dataset name/UUID, or inline rows `{ input, expected, metadata }` (`expected_output` aliases `expected`) |
-| `task` | `(input) => output`. Always receives `input` only. Async is awaited |
-| `scorers` | Builtin ids `exact_match`, `contains`, `json_valid`; platform names/ids; and/or functions |
-| `prompt` | Optional prompt name for version ids and cell label (otherwise `Task`) |
-| `maxConcurrency` | Parallel workers (default 10) |
-| `persist` | Create an experiment (default `true`) |
-| `providerKeys` | BYO keys for platform LLM-as-judge, and `typesafe` for Jev Decision. A Jev score keeps each question, so the experiment shows one chip per question. |
-| `progress` | Print `N/M` to stderr (default `true`) |
-
-Returns `EvaluateResult` with `rows`, `aggregates`, `summary()`, `url`, `experimentId`, `datasetId`, `errors`, `persistError`. Empty data, bad config, and dataset/scorer API failures throw `EvaluateError`. Full reference: [Evaluate in the SDK](https://traccia.ai/docs/sdk/evaluate).
-
----
-
-## Governance
-
-### `observe()` vs `govern()`
-
-| API | Purpose | Requires Traccia platform |
-|-----|---------|----------------------------|
-| `observe()` | Observability only | No |
-| `govern()` | Observability + runtime policy enforcement | **Yes** |
-
-`govern()` does two things:
-
-1. Checks agent status before the function body (can warn or stop the **next** run for after-ingest policies).
-2. Turns on a per-call check for **this** LLM or tool call (Spend Cap, Model Boundary, Loop Cap). You do not call `checkPolicy()` yourself when using an instrumented LLM client and `observe({ asType: 'tool' })`.
-
-Tracing-only or self-hosted users should use `observe()`.
-
-```typescript
-import { OpenAI } from 'openai';
-import { init, observe, govern, AgentBlockedError } from '@traccia/sdk';
-
-await init({ apiKey: '...', endpoint: 'https://api.traccia.ai/v2/traces', agentId: 'my-agent' });
-const client = new OpenAI();
-
-const lookupOrder = observe({ name: 'lookup_order', asType: 'tool' })(
-  async (orderId: string) => ({ order_id: orderId, status: 'shipped' }),
-);
-
-const runAgent = govern({
-  name: 'run_agent',
-})(async (prompt: string) => {
-  await lookupOrder('ORD-1');
-  const resp = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [{ role: 'user', content: prompt }],
-  });
-  return resp.choices[0]?.message?.content ?? '';
-});
-
-try {
-  await runAgent('hello');
-} catch (err) {
-  if (err instanceof AgentBlockedError) {
-    console.log(err.reasons, err.decisionId, err.remainingBudgetUsd);
-  }
-}
-```
-
-Identity comes from `init({ agentId })` (or `TRACCIA_AGENT_ID`). Pass `agentId` on `govern()` only to override in a multi-agent process. Without an agent ID, API key or endpoint, `govern()` throws `GovernanceConfigError` (a subclass of `AgentBlockedError`) instead of running unchecked. On Block deny, `govern()` throws `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `govern()` throws `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pendingToolResult()` is a normal tool result when a framework retries raised errors.
-
-`observe({ asType: 'tool' })` matches Python `@observe(as_type="tool")`. `type: 'tool'` still works.
-
-For a custom tool that is **not** wrapped with `observe({ asType: 'tool' })`, call `checkPolicy({ action: { type: 'tool_call', name: 'refund' }, context: { input: { amount } } })` yourself.
-
-#### When Traccia can't be reached
-
-If a check gets no answer (timeout, connection error, 5xx, or an invalid answer), the call follows your **policy fail mode**: **Settings → Policy Enforcement** in the app, for the organization or one workspace. The default is to block: the call throws `AgentBlockedError`, and the provider or tool is never called. Choose Allow there to let calls through while Traccia is down.
-
-- The setting arrives with answers the SDK already gets: the agent status at the start of each `govern()` run (cached 60 s) and each policy check. There are no extra requests, and tracing-only code never calls Traccia for it.
-- It is kept for 10 minutes after the last answer that carried it, then the SDK goes back to blocking. A process that has had no answer yet, for example one that starts while Traccia is down, blocks. Calling `init()` again forgets it.
-- A local override applies only when there is no answer: `init({ policyFailMode: 'open' | 'closed' })` for the process, or `govern({ policyFailMode })` for one run and the checks inside it. It never overrides a rejected API key (401/403), a block, a deny or a configuration error. The SDK logs a warning once when it disagrees with your Traccia setting, since the [Traccia Gateway](https://traccia.ai/docs/platform/gateway) follows the setting.
-- `govern({ failOpen })` and `checkAgentStatus(id, { failOpen })` are deprecated: `true` means `policyFailMode: 'open'`, `false` means `'closed'`. Omit it to follow your setting.
-
-Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK guide: [Governance in the SDK](https://traccia.ai/docs/sdk/governance).
-
-**Advanced (optional):** override endpoints in `traccia.toml`:
-
-```toml
-[governance]
-status_check_endpoint = "https://custom.example/agents/{agent_id}/status"
-post_block_endpoint = "https://custom.example/agents/{agent_id}/blocks"
-status_cache_ttl_seconds = 120
-policy_fail_mode = "closed"   # optional local override, see above
-```
-
-### Transparency — `disclosure()`
-
-Record EU AI Act Art. 50 transparency evidence on the active span when your UI shows an AI disclosure:
-
-```typescript
-import { disclosure } from '@traccia/sdk';
-
-disclosure({ channel: 'ui', disclosedToUser: true });
-```
-
-### HIPAA-oriented init
-
-```ts
-init({
-  compliance: { frameworks: ['hipaa'] },
-  redactPii: true, // recommended; defaults on when hipaa is in frameworks unless set false
-});
-```
-
-Soft warnings only — Traccia does not block PHI. See [HIPAA docs](https://traccia.ai/docs/compliance/hipaa) and the [Trust Center](https://traccia.ai/trust-center). No signed BAA yet — contact [support@traccia.ai](mailto:support@traccia.ai).
-
----
+> ### Read this far? Come build Traccia with us.
+>
+> If you want to work on Traccia full time, skip the cover letter. Email **[founders@traccia.ai](mailto:founders@traccia.ai)** with one specific thing: a trace the SDK got wrong, a policy you needed and couldn't build, or a part of this code you would rewrite and how.
+>
+> "I'm passionate about AI" gets archived. A link to your pull request gets a reply.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
+[Apache 2.0](LICENSE). Built on [OpenTelemetry](https://opentelemetry.io/).
