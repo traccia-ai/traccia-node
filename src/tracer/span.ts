@@ -19,16 +19,28 @@ export class Span implements ISpan {
   public endTimeNs?: number;
   public name: string;
   public parentSpanId?: string;
+  public parentSpanContext?: ISpanContext;
+  public isRemoteParent?: boolean;
 
   private otelSpan: OTelSpan;
   private provider: TracerProvider;
   private ended = false;
 
-  constructor(name: string, otelSpan: OTelSpan, provider?: TracerProvider, parentSpanId?: string, attributes?: Record<string, unknown>) {
+  constructor(
+    name: string,
+    otelSpan: OTelSpan,
+    provider?: TracerProvider,
+    parentSpanId?: string,
+    attributes?: Record<string, unknown>,
+    parentSpanContext?: ISpanContext,
+    isRemoteParent?: boolean,
+  ) {
     this.name = name;
     this.otelSpan = otelSpan;
     this.provider = provider as TracerProvider;
     this.parentSpanId = parentSpanId;
+    this.parentSpanContext = parentSpanContext;
+    this.isRemoteParent = isRemoteParent ?? Boolean((otelSpan as any)?.parentSpanContext?.isRemote ?? parentSpanContext?.isRemote);
     this.attributes = attributes ? { ...attributes } : {};
     this.startTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
   }
@@ -39,7 +51,8 @@ export class Span implements ISpan {
       traceId: ctx.traceId,
       spanId: ctx.spanId,
       traceFlags: ctx.traceFlags,
-      traceState: ctx.traceState?.serialize()
+      traceState: ctx.traceState?.serialize(),
+      isRemote: ctx.isRemote,
     };
   }
 
@@ -112,7 +125,7 @@ export class Span implements ISpan {
     this.otelSpan.end();
 
     // The run is over once its local root span ends; drop its policy evidence.
-    if (!this.parentSpanId) {
+    if (!this.parentSpanId || this.isRemoteParent) {
       forgetTrace(this.context?.traceId);
     }
   }

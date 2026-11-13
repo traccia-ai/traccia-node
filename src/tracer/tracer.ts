@@ -48,7 +48,7 @@ export class Tracer implements ITracer {
         traceId: options.parent.context.traceId,
         spanId: options.parent.context.spanId,
         traceFlags: options.parent.context.traceFlags ?? 1,
-        isRemote: false
+        isRemote: Boolean(options.parent.context.isRemote)
       });
     } else if (options?.parent === null) {
       // Explicitly detach from current active span context
@@ -71,9 +71,20 @@ export class Tracer implements ITracer {
     };
 
     const otelSpan = this.otelTracer.startSpan(name, otelOptions, activeContext);
-    const parentSpanId = trace.getSpanContext(activeContext)?.spanId;
+    const parentContext = trace.getSpanContext(activeContext);
+    const parentSpanId = parentContext?.spanId;
+    const isRemoteParent = Boolean(parentContext?.isRemote);
+    const parentSpanCtx: ISpanContext | undefined = parentContext
+      ? {
+          traceId: parentContext.traceId,
+          spanId: parentContext.spanId,
+          traceFlags: parentContext.traceFlags,
+          traceState: parentContext.traceState?.serialize(),
+          isRemote: parentContext.isRemote,
+        }
+      : undefined;
 
-    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes);
+    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes, parentSpanCtx, isRemoteParent);
   }
 
   /**
