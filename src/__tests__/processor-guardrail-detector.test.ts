@@ -172,4 +172,174 @@ describe('GuardrailDetectorProcessor', () => {
         // Flush doesn't crash
         processor.forceFlush();
     });
+
+    describe('root status from parent linkage and late children (TRC-295)', () => {
+        it('does not classify child without tracestate as root when parentSpanId is present', () => {
+            const childSpan = {
+                attributes: {},
+                setAttribute: jest.fn(),
+                context: {
+                    traceId: 'trace-no-tracestate',
+                    spanId: 'child-1',
+                    traceState: undefined
+                },
+                parentSpanId: 'root-1'
+            } as any;
+
+            const childFindings = [{ id: 'f-child', category: 'moderation' }];
+            (detectors.detectAll as jest.Mock).mockReturnValue(childFindings);
+
+            processor.onEnd(childSpan);
+
+            expect(childSpan.setAttribute).toHaveBeenCalledWith('guardrail.finding.count', 1);
+            expect(childSpan.setAttribute).toHaveBeenCalledWith('guardrail.findings', expect.stringContaining('moderation'));
+            expect(childSpan.setAttribute).not.toHaveBeenCalledWith('guardrail.summary', expect.any(String));
+            expect(childSpan.setAttribute).not.toHaveBeenCalledWith('guardrail.summary.detected_categories', expect.any(Array));
+            expect(guardrails.evaluateRun).not.toHaveBeenCalled();
+        });
+
+        it('retains child aggregation until real root ends and writes summary on root', () => {
+            const childSpan = {
+                attributes: { 'llm.finish_reason': 'content_filter' },
+                setAttribute: jest.fn(),
+                context: {
+                    traceId: 'trace-aggregation',
+                    spanId: 'child-1',
+                    traceState: undefined
+                },
+                parentSpanId: 'root-1'
+            } as any;
+
+            const rootSpan = {
+                attributes: {},
+                setAttribute: jest.fn(),
+                context: {
+                    traceId: 'trace-aggregation',
+                    spanId: 'root-1',
+                    traceState: undefined
+                },
+                parentSpanId: undefined
+            } as any;
+
+            const childFindings = [{ id: 'f-child', category: 'moderation', status: 'detected' }];
+            (detectors.detectAll as jest.Mock).mockImplementation((_attrs, _traceId, spanId) => {
+                if (spanId === 'child-1') return childFindings;
+                return [];
+            });
+
+            const mockSummary = {
+                detected_categories: ['moderation'],
+                triggered_categories: ['moderation'],
+                missing_categories: [],
+                coverage_confidence: 'high',
+                capabilities_observed: ['calls_llm'],
+                limitations: []
+            };
+            (guardrails.evaluateRun as jest.Mock).mockReturnValue(mockSummary);
+
+            processor.onEnd(childSpan);
+            expect(childSpan.setAttribute).not.toHaveBeenCalledWith('guardrail.summary', expect.any(String));
+
+            processor.onEnd(rootSpan);
+
+            expect(guardrails.evaluateRun).toHaveBeenCalledWith(expect.objectContaining({
+                findings: expect.arrayContaining([expect.objectContaining({ id: 'f-child' })])
+            }));
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary', expect.any(String));
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary.detected_categories', ['moderation']);
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary.coverage_confidence', 'high');
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.findings', expect.stringContaining('f-child'));
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.finding.count', 1);
+        });
+
+        it('explicitly accommodates late children ending after the root has ended', () => {
+            const rootSpan = {
+                attributes: {},
+                setAttribute: jest.fn(),
+                context: {
+                    traceId: 'trace-late',
+                    spanId: 'root-1',
+                    traceState: undefined
+                },
+                parentSpanId: undefined
+            } as any;
+
+            const lateChildSpan = {
+                attributes: { 'llm.finish_reason': 'content_filter' },
+                setAttribute: jest.fn(),
+                context: {
+                    traceId: 'trace-late',
+                    spanId: 'child-late',
+                    traceState: undefined
+                },
+                parentSpanId: 'root-1'
+            } as any;
+
+            const lateFindings = [{ id: 'f-late', category: 'moderation' }];
+            (detectors.detectAll as jest.Mock).mockImplementation((_attrs, _traceId, spanId) => {
+                if (spanId === 'child-late') return lateFindings;
+                return [];
+            });
+
+            const initialSummary = {
+                detected_categories: [],
+                triggered_categories: [],
+                missing_categories: [],
+                coverage_confidence: 'low',
+                capabilities_observed: [],
+                limitations: []
+            };
+            const updatedSummary = {
+                detected_categories: ['moderation'],
+                triggered_categories: ['moderation'],
+                missing_categories: [],
+                coverage_confidence: 'high',
+                capabilities_observed: ['calls_llm'],
+                limitations: []
+            };
+
+            (guardrails.evaluateRun as jest.Mock)
+                .mockReturnValueOnce(initialSummary)
+                .mockReturnValueOnce(updatedSummary);
+
+            processor.onEnd(rootSpan);
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary.coverage_confidence', 'low');
+
+            processor.onEnd(lateChildSpan);
+
+            expect(lateChildSpan.setAttribute).toHaveBeenCalledWith('guardrail.finding.count', 1);
+            expect(lateChildSpan.setAttribute).not.toHaveBeenCalledWith('guardrail.summary', expect.any(String));
+
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary.detected_categories', ['moderation']);
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.summary.coverage_confidence', 'high');
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.finding.count', 1);
+            expect(rootSpan.setAttribute).toHaveBeenCalledWith('guardrail.findings', expect.stringContaining('f-late'));
+        });
+
+        it('bounds memory to MAX_TRACES by evicting oldest traces', () => {
+            for (let i = 0; i < 10005; i++) {
+                const span = {
+                    attributes: {},
+                    setAttribute: jest.fn(),
+                    context: {
+                        traceId: `trace-b-${i}`,
+                        spanId: `span-${i}`
+                    },
+                    parentSpanId: undefined
+                } as any;
+                (detectors.detectAll as jest.Mock).mockReturnValue([]);
+                (guardrails.evaluateRun as jest.Mock).mockReturnValue({
+                    detected_categories: [],
+                    triggered_categories: [],
+                    missing_categories: [],
+                    coverage_confidence: 'low',
+                    capabilities_observed: [],
+                    limitations: []
+                });
+                processor.onEnd(span);
+            }
+
+            expect(processor.getTraceCount()).toBeLessThanOrEqual(10000);
+        });
+    });
 });
