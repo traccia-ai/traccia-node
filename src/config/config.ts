@@ -95,7 +95,7 @@ export function loadConfig(configFile?: string): TracciaConfig {
   const defaultConfig: TracciaConfig = {
     tracing: {
       sample_rate: 1.0,
-      auto_start_trace: true,
+      auto_start_trace: false, // read by the Python SDK; Node never starts a root trace on init
       auto_trace_name: 'root',
       use_otlp: true,
     },
