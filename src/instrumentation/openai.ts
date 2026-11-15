@@ -288,24 +288,114 @@ export function patchOpenAIResponses(): boolean {
 }
 
 /**
+ * Responses output items that hand control back to the caller, the counterpart of a Chat
+ * Completions finish_reason of "tool_calls": tools the caller runs (function, custom,
+ * computer use, local shell, shell, apply_patch) and an MCP call awaiting the caller's
+ * approval. Hosted tool items (web_search_call, file_search_call, code_interpreter_call,
+ * image_generation_call, mcp_call, ...) run on OpenAI's side and do not end the turn.
+ */
+const RESPONSES_CLIENT_TOOL_ITEMS = new Set([
+    'function_call',
+    'custom_tool_call',
+    'computer_call',
+    'local_shell_call',
+    'shell_call',
+    'apply_patch_call',
+    'mcp_approval_request',
+]);
+
+/**
+ * `incomplete_details.reason` mapped to the Chat Completions finish_reason vocabulary,
+ * so `llm.finish_reason` means the same thing for both OpenAI APIs.
+ */
+const RESPONSES_INCOMPLETE_REASONS: Record<string, string> = {
+    max_output_tokens: 'length',
+    content_filter: 'content_filter',
+};
+
+/**
+ * The text a Responses API response produced, or undefined when it produced none.
+ *
+ * Text lives two levels down: `output` is a list of items, and each `message` item holds
+ * `content` parts of type `output_text`. They are joined the way the SDK's own
+ * `response.output_text` joins them. A response that only refused yields the refusal text,
+ * so a refusal is still visible on the span.
+ */
+export function responsesCompletion(response: unknown): string | undefined {
+    const output = safeGet(response, 'output');
+    if (!Array.isArray(output)) {
+        return undefined;
+    }
+    const texts: string[] = [];
+    const refusals: string[] = [];
+    for (const item of output) {
+        // A bare top-level text item is accepted for older or hand-built payloads.
+        if (safeGet(item, 'type') === 'text' && typeof safeGet(item, 'text') === 'string') {
+            texts.push(safeGet(item, 'text') as string);
+            continue;
+        }
+        const content = safeGet(item, 'content');
+        if (!Array.isArray(content)) {
+            continue;
+        }
+        for (const part of content) {
+            const type = safeGet(part, 'type');
+            if (type === 'output_text' || type === 'text') {
+                const text = safeGet(part, 'text');
+                if (typeof text === 'string') {
+                    texts.push(text);
+                }
+            } else if (type === 'refusal') {
+                const refusal = safeGet(part, 'refusal');
+                if (typeof refusal === 'string') {
+                    refusals.push(refusal);
+                }
+            }
+        }
+    }
+    return texts.join('') || refusals.join('') || undefined;
+}
+
+/**
+ * A Chat-style finish reason for a Responses API response.
+ *
+ * The Responses API has no finish_reason; it reports `status` and, when incomplete,
+ * `incomplete_details.reason`. A completed response is "tool_calls" when it ends by asking
+ * the caller to run a tool and "stop" otherwise. An incomplete one maps its reason
+ * ("max_output_tokens" -> "length"; unknown reasons pass through). Other statuses (failed,
+ * cancelled, in progress) have no finish reason; `llm.response.status` records them.
+ */
+export function responsesFinishReason(response: unknown): string | undefined {
+    const status = safeGet(response, 'status');
+    if (status === 'completed') {
+        const output = safeGet(response, 'output');
+        const callsTool =
+            Array.isArray(output) &&
+            output.some((item) => RESPONSES_CLIENT_TOOL_ITEMS.has(String(safeGet(item, 'type'))));
+        return callsTool ? 'tool_calls' : 'stop';
+    }
+    if (status === 'incomplete') {
+        const reason = safeGet(response, 'incomplete_details.reason');
+        if (reason) {
+            return RESPONSES_INCOMPLETE_REASONS[String(reason)] ?? String(reason);
+        }
+    }
+    return undefined;
+}
+
+/**
  * Populate a span from a completed Responses API response.
  */
 function populateResponsesSpan(span: ISpan, response: unknown): void {
-    // Extract output from response
-    const output = safeGet(response, 'output');
-    if (Array.isArray(output) && output.length > 0) {
-        const textItems = output.filter(
-            (item: unknown) =>
-                typeof item === 'object' &&
-                (item as Record<string, unknown>).type === 'text'
-        );
-        if (textItems.length > 0) {
-            const text = (textItems[0] as Record<string, unknown>).text;
-            if (typeof text === 'string') {
-                span.setAttribute('llm.completion', text.slice(0, 1000));
-                span.setAttribute('llm.response', text.slice(0, 1000));
-            }
-        }
+    const completion = responsesCompletion(response);
+    if (completion) {
+        span.setAttribute('llm.completion', completion.slice(0, 1000));
+        // Deprecated alias of llm.completion, kept for existing readers.
+        span.setAttribute('llm.response', completion.slice(0, 1000));
+    }
+    const finishReason = responsesFinishReason(response);
+    if (finishReason) {
+        span.setAttribute('llm.finish_reason', finishReason);
     }
 
     const respModel = safeGet(response, 'model') as string | undefined;
