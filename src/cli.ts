@@ -113,8 +113,9 @@ api_key = ""
 # Sampling rate (0.0 to 1.0) - controls what percentage of traces are sent
 sample_rate = 1.0
 
-# Auto-start a root trace on init (default: true)
-auto_start_trace = true
+# Python SDK only: start one root trace on init for the whole run of a script (default: false).
+# The Node SDK never does this: each top-level call is its own trace; group calls with runWithAutoTrace().
+auto_start_trace = false
 
 # Name for the auto-started root trace
 auto_trace_name = "root"

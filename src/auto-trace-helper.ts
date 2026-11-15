@@ -2,10 +2,10 @@ import { getTracerProvider } from './auto';
 import { SpanStatus } from './types';
 
 /**
- * Run a function within an auto-started root trace.
+ * Run a function within one root trace, so every span it creates joins that trace.
  *
- * This mimics the Python SDK's auto_start_trace behavior but adapted for
- * Node.js's callback-based context management.
+ * init() never starts a root trace: each top-level call is its own trace. Use this to
+ * group several calls, like the Python SDK's `with traccia.trace(name):`.
  */
 export async function runWithAutoTrace<T>(
     name: string,
