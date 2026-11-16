@@ -107,8 +107,10 @@ describe('TracciaAgentsTracingProcessor', () => {
       processor.onSpanStart(span);
       
       expect(mockTracer.startSpan).toHaveBeenCalledWith('agent.my-agent', expect.objectContaining({
-        'agent.span.type': 'agent',
-        'agent.name': 'my-agent'
+        attributes: expect.objectContaining({
+          'agent.span.type': 'agent',
+          'agent.name': 'my-agent'
+        })
       }));
       expect((processor as any).spanMap.has('span-1')).toBe(true);
     });
@@ -200,7 +202,7 @@ describe('TracciaAgentsTracingProcessor', () => {
       processor.onSpanStart({ spanId: 'fn-2', spanData: { type: 'function', name: 'calculator' } });
       expect(mockTracer.startSpan).toHaveBeenCalledWith(
         'agent.tool.calculator',
-        expect.objectContaining({ 'agent.tool.name': 'calculator' }),
+        expect.objectContaining({ attributes: expect.objectContaining({ 'agent.tool.name': 'calculator' }) }),
       );
     });
 

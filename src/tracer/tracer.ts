@@ -4,7 +4,7 @@
 
 import { trace, Tracer as OTelTracer, context as otelContext, SpanOptions as OTelSpanOptions, ROOT_CONTEXT } from '@opentelemetry/api';
 import { ITracer, ISpan, ISpanContext } from '../types';
-import { Span } from './span';
+import { Span, isValidTimeNs, nsToHrTime } from './span';
 import { runWithSpanAsync, getCurrentSpan } from '../context/context';
 import { TracerProvider } from './provider';
 
@@ -31,6 +31,8 @@ export class Tracer implements ITracer {
       attributes?: Record<string, unknown>;
       parent?: ISpan | null;
       parentContext?: ISpanContext | null;
+      /** Start time in epoch nanoseconds, for work that began earlier (e.g. framework callbacks); now if omitted. */
+      startTimeNs?: number;
     }
   ): ISpan {
     let activeContext = otelContext.active();
@@ -66,14 +68,19 @@ export class Tracer implements ITracer {
       }
     }
 
+    const requestedStartNs = options?.startTimeNs;
+    const startTimeNs = isValidTimeNs(requestedStartNs) ? requestedStartNs : undefined;
     const otelOptions: OTelSpanOptions = {
       attributes: options?.attributes as any,
     };
+    if (startTimeNs !== undefined) {
+      otelOptions.startTime = nsToHrTime(startTimeNs);
+    }
 
     const otelSpan = this.otelTracer.startSpan(name, otelOptions, activeContext);
     const parentSpanId = trace.getSpanContext(activeContext)?.spanId;
 
-    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes);
+    return new Span(name, otelSpan, this.provider, parentSpanId, options?.attributes, startTimeNs);
   }
 
   /**
