@@ -19,6 +19,7 @@ export interface ISpanContext {
   spanId: string;
   traceFlags: number;
   traceState?: string;
+  isRemote?: boolean;
 }
 
 /**
@@ -37,6 +38,9 @@ export interface ISpan {
   context: ISpanContext;
   name: string;
   parentSpanId?: string;
+  parentSpanContext?: ISpanContext;
+  isRemoteParent?: boolean;
+  isLocalRoot?: boolean;
   attributes: Record<string, unknown>;
   events: SpanEvent[];
   status: SpanStatus;

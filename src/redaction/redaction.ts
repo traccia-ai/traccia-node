@@ -176,12 +176,18 @@ export function applyRedactionToSpan(
       if (key === REDACTION_APPLIED) continue;
       if (!valuesEqual(raw[key], value)) {
         span.setAttribute!(key, value);
+        if (span.attributes) {
+          span.attributes[key] = value;
+        }
         changed++;
       } else if (
         options?.setUnchanged &&
         (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
       ) {
         span.setAttribute!(key, value);
+        if (span.attributes) {
+          span.attributes[key] = value;
+        }
       }
     }
   }
@@ -207,6 +213,9 @@ export function applyRedactionToSpan(
 
   if (hasAttrs || changed > 0) {
     span.setAttribute!(REDACTION_APPLIED, true);
+    if (span.attributes) {
+      span.attributes[REDACTION_APPLIED] = true;
+    }
   }
   return changed;
 }

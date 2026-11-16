@@ -16,20 +16,36 @@ import {
   evaluateRun,
 } from "../guardrails";
 import { detectAll } from "../guardrails/detectors";
+import { REDACTION_APPLIED, redactString, redactValue } from "../redaction";
 
 export interface GuardrailDetectorOptions {
   heuristicsEnabled?: boolean;
+}
+
+function isLocalRootSpan(span: ISpan): boolean {
+  if ((span as any).isLocalRoot !== undefined) {
+    return Boolean((span as any).isLocalRoot);
+  }
+  const parentSpanId = span.parentSpanId ?? (span as any).parent_span_id;
+  if (!parentSpanId) {
+    return true;
+  }
+  return Boolean(
+    span.isRemoteParent ??
+    (span as any).parentSpanContext?.isRemote ??
+    (span as any).otelSpan?.parentSpanContext?.isRemote ??
+    (span as any).parentContext?.isRemote
+  );
 }
 
 interface TraceState {
   spanAttrs: Record<string, unknown>[];
   spanIds: (string | null)[];
   findings: GuardrailFindingWithMeta[];
+  rootSpan?: ISpan;
+  rootEnded?: boolean;
 }
 
-/**
- * Guardrail detector processor.
- */
 export class GuardrailDetectorProcessor implements ISpanProcessor {
   private heuristicsEnabled: boolean;
   private traces: Map<string, TraceState> = new Map();
@@ -38,9 +54,6 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
     this.heuristicsEnabled = options?.heuristicsEnabled ?? true;
   }
 
-  /**
-   * Called before OTel span.end(); span is still mutable.
-   */
   onEnd(span: ISpan): void {
     try {
       const attrs = span.attributes;
@@ -51,7 +64,6 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         return;
       }
 
-      // Detect findings from this span
       const findings = detectAll(
         attrs,
         traceId,
@@ -59,22 +71,19 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         this.heuristicsEnabled,
       );
 
-      // Write per-span findings as attributes
       if (findings.length > 0) {
         span.setAttribute("guardrail.finding.count", findings.length);
         try {
-          const findingsJson = JSON.stringify(findings.map((f) => ({
+          span.setAttribute("guardrail.findings", JSON.stringify(findings.map((f) => ({
             ...f,
             id: f.id,
             status: f.status,
-          })));
-          span.setAttribute("guardrail.findings", findingsJson);
+          }))));
         } catch {
-          // Silently fail on JSON serialization
+          // Serialization failure ignored
         }
       }
 
-      // Accumulate into trace-scoped state
       let state = this.traces.get(traceId);
       if (!state) {
         state = { spanAttrs: [], spanIds: [], findings: [] };
@@ -84,32 +93,26 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
       state.spanIds.push(spanId);
       state.findings.push(...findings);
 
-      // If this is the root span, compute and write the aggregated summary
-      // Root span has no parent
-      const isRoot = !span.context.traceState || span.parentSpanId === undefined;
+      const isRoot = isLocalRootSpan(span);
       if (isRoot) {
+        state.rootSpan = span;
+        state.rootEnded = true;
         this.writeSummary(span, traceId);
+      } else if (state.rootEnded && state.rootSpan) {
+        this.writeSummary(state.rootSpan, traceId);
       }
     } catch (exc) {
-      // Log warning but don't crash
       console.warn(
         `[Traccia] GuardrailDetectorProcessor.onEnd failed: ${exc instanceof Error ? exc.message : String(exc)}`,
       );
     }
   }
 
-  /**
-   * Compute the full guardrail summary and write it onto the root span.
-   */
   private writeSummary(span: ISpan, traceId: string): void {
     const state = this.traces.get(traceId);
-
     if (!state) {
       return;
     }
-
-    // Remove this trace state now that we're processing the summary
-    this.traces.delete(traceId);
 
     try {
       const summary = evaluateRun({
@@ -119,7 +122,7 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         heuristicsEnabled: this.heuristicsEnabled,
       });
 
-      span.setAttribute("guardrail.summary", JSON.stringify({
+      let summaryJson = JSON.stringify({
         detected_categories: summary.detected_categories,
         triggered_categories: summary.triggered_categories,
         missing_categories: summary.missing_categories.map((m) => ({
@@ -131,27 +134,46 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
         coverage_confidence: summary.coverage_confidence,
         capabilities_observed: summary.capabilities_observed,
         limitations: summary.limitations,
-      }));
-      span.setAttribute(
-        "guardrail.summary.detected_categories",
-        summary.detected_categories,
-      );
-      span.setAttribute(
-        "guardrail.summary.missing_count",
-        summary.missing_categories.length,
-      );
-      span.setAttribute(
-        "guardrail.summary.coverage_confidence",
-        summary.coverage_confidence,
-      );
+      });
 
-      // Also write the full findings list on the root span
-      if (state.findings.length > 0) {
-        span.setAttribute(
-          "guardrail.findings",
-          JSON.stringify(state.findings.map((f) => ({ ...f }))),
-        );
-        span.setAttribute("guardrail.finding.count", state.findings.length);
+      const isAlreadyRedacted = Boolean(span.attributes?.[REDACTION_APPLIED]);
+      const rawFindings = isAlreadyRedacted
+        ? (redactValue(state.findings, { sensitive: true }) as GuardrailFindingWithMeta[])
+        : state.findings;
+
+      let findingsJson = rawFindings.length > 0
+        ? JSON.stringify(rawFindings.map((f) => ({ ...f })))
+        : undefined;
+
+      if (isAlreadyRedacted) {
+        summaryJson = redactString(summaryJson);
+        if (findingsJson) {
+          findingsJson = redactString(findingsJson);
+        }
+      }
+
+      span.setAttribute("guardrail.summary", summaryJson);
+      span.setAttribute("guardrail.summary.detected_categories", summary.detected_categories);
+      span.setAttribute("guardrail.summary.missing_count", summary.missing_categories.length);
+      span.setAttribute("guardrail.summary.coverage_confidence", summary.coverage_confidence);
+
+      if (span.attributes) {
+        span.attributes["guardrail.summary"] = summaryJson;
+        span.attributes["guardrail.summary.detected_categories"] = summary.detected_categories;
+        span.attributes["guardrail.summary.missing_count"] = summary.missing_categories.length;
+        span.attributes["guardrail.summary.coverage_confidence"] = summary.coverage_confidence;
+        if (isAlreadyRedacted) {
+          span.attributes[REDACTION_APPLIED] = true;
+        }
+      }
+
+      if (findingsJson) {
+        span.setAttribute("guardrail.findings", findingsJson);
+        span.setAttribute("guardrail.finding.count", rawFindings.length);
+        if (span.attributes) {
+          span.attributes["guardrail.findings"] = findingsJson;
+          span.attributes["guardrail.finding.count"] = rawFindings.length;
+        }
       }
     } catch (exc) {
       console.warn(
@@ -165,6 +187,5 @@ export class GuardrailDetectorProcessor implements ISpanProcessor {
   }
 
   forceFlush(_timeout?: number): void {
-    // No-op - guardrails are computed on span end, not batched
   }
 }
