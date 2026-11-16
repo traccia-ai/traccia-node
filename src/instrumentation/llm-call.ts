@@ -20,6 +20,9 @@ import { getTracer } from '../auto';
 import { runWithSpanAsync } from '../context/context';
 import { SpanStatus, ISpan } from '../types';
 import { enforceLlmCall, finishLlmCall } from '../governance/pep';
+import { recordLlmMetrics } from '../metrics/recorder';
+import { getAgentId, getAgentName, getEnv } from '../config/runtime-config';
+import { computeCost } from '../processor/cost-processor';
 
 export interface ProviderCallHooks<S> {
     tracerName: string;
@@ -243,6 +246,53 @@ class LazyProviderPromise<T> extends Promise<T> implements ProviderPromise<T> {
 /**
  * Run a provider `create` call inside a traced, governance-enforced span.
  */
+
+function recordSpanMetrics(span: ISpan, durationSeconds: number): void {
+    safely(() => {
+        const attrs = span.attributes || {};
+        const vendor = String(attrs['llm.vendor'] || 'llm');
+        const model = (attrs['llm.model'] || attrs['model']) as string | undefined;
+        const promptTokens = (attrs['llm.usage.prompt_tokens'] ?? attrs['llm.usage.input_tokens']) as number | undefined;
+        const completionTokens = (attrs['llm.usage.completion_tokens'] ?? attrs['llm.usage.output_tokens']) as number | undefined;
+        const cacheReadTokens = (attrs['llm.usage.cache_read_tokens'] ?? attrs['cache_read_tokens']) as number | undefined;
+        const cacheWriteTokens = (attrs['llm.usage.cache_write_tokens'] ?? attrs['cache_write_tokens']) as number | undefined;
+
+        let cost = (attrs['llm.cost.usd'] ?? attrs['cost_usd'] ?? attrs['llm.cost']) as number | undefined;
+        if (cost === undefined && model && (promptTokens !== undefined || completionTokens !== undefined)) {
+            cost = computeCost(
+                model,
+                promptTokens || 0,
+                completionTokens || 0,
+                cacheReadTokens || 0,
+                cacheWriteTokens || 0,
+                vendor,
+            );
+            if (cost !== undefined) {
+                span.setAttribute('llm.cost.usd', cost);
+                span.setAttribute('cost_usd', cost);
+            }
+        }
+
+        const agentId = (attrs['agent.id'] ?? attrs['agent_id']) as string | undefined;
+        const agentName = attrs['agent.name'] as string | undefined;
+        const env = (attrs['environment'] ?? attrs['env']) as string | undefined;
+
+        recordLlmMetrics({
+            vendor,
+            model,
+            promptTokens,
+            completionTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
+            duration: durationSeconds > 0 ? durationSeconds : 0.001,
+            cost,
+            agentId,
+            agentName,
+            environment: env,
+        });
+    });
+}
+
 export function tracedProviderCall<S>(
     createFn: (...args: unknown[]) => unknown,
     thisArg: unknown,
@@ -252,8 +302,24 @@ export function tracedProviderCall<S>(
     const tracer = getTracer(hooks.tracerName);
     const kwargs = (args[0] || {}) as Record<string, unknown>;
     const span = tracer.startSpan(hooks.spanName);
+    const startTime = Date.now();
     for (const [key, value] of Object.entries(hooks.attributes)) {
         span.setAttribute(key, value);
+    }
+
+    const callingAgentId = getAgentId();
+    const callingAgentName = getAgentName();
+    const callingEnv = getEnv();
+    if (callingAgentId) {
+        span.setAttribute('agent.id', callingAgentId);
+        span.setAttribute('agent_id', callingAgentId);
+    }
+    if (callingAgentName) {
+        span.setAttribute('agent.name', callingAgentName);
+    }
+    if (callingEnv) {
+        span.setAttribute('environment', callingEnv);
+        span.setAttribute('env', callingEnv);
     }
 
     let decision: Record<string, unknown> | undefined;
@@ -268,6 +334,18 @@ export function tracedProviderCall<S>(
             isFinalized = true;
             if (error !== undefined) {
                 recordError(span, error);
+                safely(() => {
+                    const attrs = span.attributes || {};
+                    recordLlmMetrics({
+                        vendor: String(hooks.attributes['llm.vendor'] || 'llm'),
+                        model: (attrs['llm.model'] || kwargs.model) as string | undefined,
+                        duration: (Date.now() - startTime) / 1000,
+                        error: true,
+                        agentId: (attrs['agent.id'] ?? attrs['agent_id']) as string | undefined,
+                        agentName: attrs['agent.name'] as string | undefined,
+                        environment: (attrs['environment'] ?? attrs['env']) as string | undefined,
+                    });
+                });
             }
             finalized = inAuthScope(() =>
                 finishLlmCall(decision, error === undefined ? undefined : { release: true })
@@ -311,6 +389,7 @@ export function tracedProviderCall<S>(
                         (error) => {
                             if (error === undefined && !isFinalized) {
                                 safely(() => hooks.onStreamEnd(span, state));
+                                recordSpanMetrics(span, (Date.now() - startTime) / 1000);
                             }
                             void finalize(error);
                         }
@@ -319,6 +398,7 @@ export function tracedProviderCall<S>(
                 }
 
                 safely(() => hooks.onResponse(span, result.data));
+                recordSpanMetrics(span, (Date.now() - startTime) / 1000);
                 await finalize();
                 return result;
             } catch (error) {

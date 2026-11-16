@@ -149,6 +149,8 @@ export interface SDKConfig {
   enableMetrics?: boolean;
   metricsEndpoint?: string;
   metricsSampleRate?: number;
+  metricExporter?: unknown;
+  metricReader?: unknown;
   serviceRole?: 'agent' | 'orchestrator';
   /** Advanced: override agent status check URL ({agent_id} placeholder). */
   statusCheckEndpoint?: string;

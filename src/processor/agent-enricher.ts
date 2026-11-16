@@ -215,16 +215,20 @@ export class AgentEnrichmentProcessor implements ISpanProcessor {
         }
 
         // Cost: fill llm.cost.usd if we have tokens + model
-        if (!attrs['llm.cost.usd']) {
-            const model = attrs['llm.model'] as string | undefined;
-            const promptTokens = (attrs['llm.usage.prompt_tokens'] as number) || 0;
-            const completionTokens = (attrs['llm.usage.completion_tokens'] as number) || 0;
+        if (!attrs['llm.cost.usd'] && !attrs['cost_usd']) {
+            const model = (attrs['llm.model'] || attrs['model']) as string | undefined;
+            const promptTokens = ((attrs['llm.usage.prompt_tokens'] ?? attrs['llm.usage.input_tokens'] ?? attrs['prompt_tokens']) as number) || 0;
+            const completionTokens = ((attrs['llm.usage.completion_tokens'] ?? attrs['llm.usage.output_tokens'] ?? attrs['completion_tokens']) as number) || 0;
+            const cacheReadTokens = ((attrs['llm.usage.cache_read_tokens'] ?? attrs['cache_read_tokens']) as number) || 0;
+            const cacheWriteTokens = ((attrs['llm.usage.cache_write_tokens'] ?? attrs['cache_write_tokens']) as number) || 0;
+            const vendor = (attrs['llm.vendor'] || attrs['vendor']) as string | undefined;
 
             if (model && (promptTokens || completionTokens)) {
                 try {
-                    const cost = computeCost(model, promptTokens, completionTokens);
+                    const cost = computeCost(model, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, vendor);
                     if (cost !== undefined && cost !== null) {
                         span.setAttribute('llm.cost.usd', cost);
+                        span.setAttribute('cost_usd', cost);
                     }
                 } catch {
                     // Silently ignore cost computation errors

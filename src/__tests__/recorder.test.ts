@@ -142,5 +142,24 @@ describe('MetricsRecorder', () => {
       expect(() => recordCounter('test', 1)).not.toThrow();
       expect(() => recordHistogram('test', 1)).not.toThrow();
     });
+
+    it('shares the global recorder across separately loaded module instances', () => {
+      let isolated: typeof import('../metrics/recorder') | undefined;
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        isolated = require('../metrics/recorder');
+      });
+      expect(isolated).toBeDefined();
+      expect(isolated).not.toEqual({ getMetricsRecorder, setGlobalRecorder });
+
+      setGlobalRecorder(recorder);
+      expect(isolated!.getMetricsRecorder()).toBe(recorder);
+
+      isolated!.recordCounter('isolated_count', 4, { from: 'copy' });
+      expect(mockCounter.add).toHaveBeenCalledWith(4, { from: 'copy' });
+
+      isolated!.setGlobalRecorder(null);
+      expect(getMetricsRecorder()).toBeNull();
+    });
   });
 });
