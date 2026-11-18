@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `init({ checkOutboundHttp: true })` (or `TRACCIA_CHECK_OUTBOUND_HTTP=1`) checks every `fetch()` sent inside `govern()` against your policies before it is sent, so an Environment Boundary policy can stop an agent outside production from calling a production URL. Each redirect hop is checked: redirects are followed hop by hop, and credentials are not forwarded to another origin. A request with `redirect: 'manual'` or `'error'` is checked once. A deny throws `AgentBlockedError` and a held approval `ApprovalPending` before anything is sent. Requests to Traccia itself are never checked. Off by default
+
 ### Fixed
 - The `traccia.toml` that `traccia init` writes no longer says a root trace is auto-started on init: the Node SDK never does that, each top-level call is its own trace, and `runWithAutoTrace()` groups calls. `auto_start_trace` (read only by the Python SDK) now defaults to `false` there, matching the Python SDK
 - The ES module builds load: `import { init } from "@traccia/sdk/auto"` (and `"@traccia/sdk"`) in an app with `"type": "module"` threw `Dynamic require of "@opentelemetry/resources" is not supported` on import, so only `require()` worked. The ES module bundles now get a real `require` (from `createRequire(import.meta.url)`), so the dependencies and optional provider SDKs the source loads with `require()` resolve as in the CommonJS build

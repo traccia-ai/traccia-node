@@ -38,6 +38,7 @@ import {
 import { CostResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ITracer } from './types';
 import { configureGovernance } from './governance/config';
+import { outboundHttpEnabled, patchOutboundFetch, setOutboundHttpChecks } from './governance/outbound-http';
 import { configurePrompts } from './prompts';
 import { patchGemini } from './instrumentation/gemini';
 import { patchAxios } from './instrumentation/axios';
@@ -102,6 +103,12 @@ function applyGovernanceConfig(config: SDKConfig): void {
     statusCacheTtlSeconds: config.statusCacheTtlSeconds,
     policyFailMode: config.policyFailMode,
   });
+  // TRC-307: check outbound HTTP under govern() (Environment Boundary).
+  if (config.checkOutboundHttp !== undefined) {
+    setOutboundHttpChecks(config.checkOutboundHttp);
+  } else if (outboundHttpEnabled()) {
+    patchOutboundFetch();
+  }
 }
 
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {

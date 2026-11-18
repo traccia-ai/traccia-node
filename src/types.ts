@@ -163,6 +163,13 @@ export interface SDKConfig {
    * key, a block, a deny or a configuration error.
    */
   policyFailMode?: 'open' | 'closed';
+  /**
+   * Check every fetch() an agent sends inside govern(), and each redirect hop,
+   * against your policies before it is sent, so an Environment Boundary policy can
+   * stop an agent outside production from calling a production URL. Default off;
+   * also TRACCIA_CHECK_OUTBOUND_HTTP=1.
+   */
+  checkOutboundHttp?: boolean;
   /** Client cache TTL for loadPrompt in seconds (default 60). */
   promptCacheTtlS?: number;
   /**
