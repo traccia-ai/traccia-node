@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { resolveServiceName } from '../config/service-name';
 
 describe('resolveServiceName', () => {
@@ -34,7 +35,8 @@ describe('resolveServiceName', () => {
   });
 
   it('falls back to cwd name before traccia_app default', () => {
-    expect(resolveServiceName()).toBe('traccia-node');
+    // The checkout folder's name, whatever it is called (CI and local clones differ).
+    expect(resolveServiceName()).toBe(path.basename(process.cwd()));
   });
 
   it('falls back to argv script stem when cwd is empty', () => {

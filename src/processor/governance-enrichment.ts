@@ -2,6 +2,7 @@
  * Span processor that adds default GovernanceEvent attributes on every span.
  */
 
+import { createHash } from "crypto";
 import { ISpan, ISpanProcessor } from "../types";
 import {
   EVENT_TYPE,
@@ -85,12 +86,11 @@ export class GovernanceEnrichmentProcessor implements ISpanProcessor {
     }
 
     if (!attrs[INTEGRITY_HASH]) {
-      const crypto = require("crypto");
       const traceId = span.context?.traceId || "";
       const spanId = span.context?.spanId || "";
       const eventTypeForHash = (span.attributes[EVENT_TYPE] as string) || this.defaultEventType;
       const payload = `${traceId}:${spanId}:${eventTypeForHash}`;
-      const hash = crypto.createHash("sha256").update(payload).digest("hex");
+      const hash = createHash("sha256").update(payload).digest("hex");
       span.setAttribute(INTEGRITY_HASH, hash);
     }
 

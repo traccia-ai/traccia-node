@@ -17,7 +17,7 @@ export class TracciaError extends Error {
   public override toString(): string {
     if (Object.keys(this.details).length > 0) {
       const detailsStr = Object.entries(this.details)
-        .map(([k, v]) => `${k}=${v}`)
+        .map(([k, v]) => `${k}=${String(v)}`)
         .join(', ');
       return `${this.message} (${detailsStr})`;
     }

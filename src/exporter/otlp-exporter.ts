@@ -1,8 +1,17 @@
 import { ReadableSpan, TimedEvent } from '@opentelemetry/sdk-trace-base';
 import type { Resource as ResourceType } from '@opentelemetry/resources';
-const { resourceFromAttributes } = require('@opentelemetry/resources');
-const OTLPModule = require('@opentelemetry/exporter-trace-otlp-proto');
-const OTLPTraceExporter = OTLPModule.OTLPTraceExporter || OTLPModule.default?.OTLPTraceExporter || OTLPModule.default;
+// These load with require() on purpose: the ESM build gets a real require (see tsup.config.ts),
+// so both builds share the CommonJS copies of the OpenTelemetry packages.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { resourceFromAttributes } = require('@opentelemetry/resources') as typeof import('@opentelemetry/resources');
+type OTLPTraceExporterClass = typeof import('@opentelemetry/exporter-trace-otlp-proto').OTLPTraceExporter;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const OTLPModule = require('@opentelemetry/exporter-trace-otlp-proto') as {
+    OTLPTraceExporter?: OTLPTraceExporterClass;
+    default?: OTLPTraceExporterClass & { OTLPTraceExporter?: OTLPTraceExporterClass };
+};
+const OTLPTraceExporter =
+    OTLPModule.OTLPTraceExporter || OTLPModule.default?.OTLPTraceExporter || OTLPModule.default;
 
 // Inline types to bypass build issue with @opentelemetry/api
 enum SpanStatusCode {
@@ -44,7 +53,7 @@ export interface OtlpExporterOptions {
 }
 
 export class OtlpExporter implements ISpanExporter {
-    private exporter: any; // OTLPTraceExporter
+    private exporter: InstanceType<OTLPTraceExporterClass>;
     private resource: ResourceType;
     private instrumentationScope: InstrumentationScope;
 
@@ -86,7 +95,7 @@ export class OtlpExporter implements ISpanExporter {
 
         return new Promise((resolve) => {
             this.exporter.export(readableSpans, (result) => {
-                resolve(result.code === 0); // ExportResultCode.SUCCESS = 0
+                resolve(Number(result.code) === 0); // ExportResultCode.SUCCESS = 0
             });
         });
     }
@@ -122,7 +131,7 @@ export class OtlpExporter implements ISpanExporter {
         const events: TimedEvent[] = span.events.map(e => ({
             name: e.name,
             time: this.nsToHrTime(e.timestamp), // e.timestamp is number (ns)
-            attributes: e.attributes as any,
+            attributes: e.attributes as TimedEvent['attributes'],
         }));
 
         const parentSpanContext = span.parentSpanId
@@ -147,14 +156,13 @@ export class OtlpExporter implements ISpanExporter {
             startTime,
             endTime,
             status,
-            attributes: span.attributes as any,
+            attributes: span.attributes,
             links: [], // Traccia doesn't support links yet
             events,
             duration,
             ended: true, // we assume only ended spans are exported
             resource: this.resource,
             instrumentationLibrary: this.instrumentationScope, // Backwards compatibility for some versions
-            // @ts-ignore
             instrumentationScope: this.instrumentationScope,
             droppedAttributesCount: 0,
             droppedEventsCount: 0,

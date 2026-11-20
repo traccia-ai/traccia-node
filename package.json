@@ -53,6 +53,7 @@
     "dist",
     "data/pricing_snapshot.json",
     "src",
+    "!src/**/__tests__",
     "LICENSE",
     "README.md"
   ],
@@ -75,12 +76,12 @@
   },
   "homepage": "https://github.com/traccia-ai/traccia-node#readme",
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.19.0"
   },
   "scripts": {
     "build": "tsup",
     "build:watch": "tsup --watch",
-    "clean": "rimraf dist",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "prebuild": "npm run clean",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
@@ -106,8 +107,7 @@
     "jest-ctrf-json-reporter": "^0.0.11",
     "openai": "^7.32.0",
     "prettier": "^3.1.1",
-    "rimraf": "^5.0.7",
-    "toml": "^3.0.0",
+    "toml": "^5.0.1",
     "ts-jest": "^29.1.1",
     "tsup": "^8.5.1",
     "typescript": "^5.3.3"
@@ -124,17 +124,23 @@
     "@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
     "@opentelemetry/resources": "^2.8.0",
     "@opentelemetry/sdk-trace-base": "^2.8.0",
-    "axios": "^1.7.2",
+    "axios": "^1.21.0",
     "commander": "^12.0.0",
     "prompts": "^2.4.2",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "overrides": {
     "protobufjs": "^8.0.2",
     "esbuild": "^0.28.1",
     "js-yaml": "^4.1.2",
     "@typescript-eslint/typescript-estree": {
-      "minimatch": "^9.0.9"
+      "minimatch": "11.0.3"
+    },
+    "ctrf": {
+      "glob": {
+        ".": "14.0.3",
+        "minimatch": "11.0.3"
+      }
     }
   }
 }

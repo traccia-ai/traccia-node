@@ -323,17 +323,18 @@ export function detectProviderNative(
  */
 function parseSafetyRatingsBlocked(ratingsJson: string): boolean {
   try {
-    const ratings = JSON.parse(ratingsJson);
-    const entries = Array.isArray(ratings) ? ratings : [ratings];
+    const ratings: unknown = JSON.parse(ratingsJson);
+    const entries: unknown[] = Array.isArray(ratings) ? ratings : [ratings];
     
     for (const entry of entries) {
       if (typeof entry !== "object" || entry === null) {
         continue;
       }
-      if (entry.blocked === true) {
+      const rating = entry as { blocked?: unknown; probability?: unknown };
+      if (rating.blocked === true) {
         return true;
       }
-      if (String(entry.probability || "").toUpperCase() === "HIGH") {
+      if (String(rating.probability || "").toUpperCase() === "HIGH") {
         return true;
       }
     }

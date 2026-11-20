@@ -1,7 +1,7 @@
 /**
  * Type guard for OTLP status object.
  */
-function isOtelStatus(obj: any): obj is { code: any } {
+function isOtelStatus(obj: unknown): obj is { code: unknown } {
   return obj !== null && obj !== undefined && typeof obj === 'object' && 'code' in obj;
 }
 /**
@@ -106,7 +106,7 @@ export class HttpExporter implements ISpanExporter {
 
     const otelSpans = spans.map((span) => {
       const status = span.status;
-      let otelStatus;
+      let otelStatus: { code: unknown; message?: string };
       if (isOtelStatus(status)) {
         otelStatus = status;
       } else {

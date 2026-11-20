@@ -212,7 +212,8 @@ export class RateLimitingSpanProcessor implements ISpanProcessor {
 
         // Pass to next processor
         if (this.nextProcessor?.onEnd) {
-            await this.nextProcessor.onEnd(span);
+            // onEnd is typed void, but the next processor may be async: wait for it.
+            await (this.nextProcessor.onEnd(span) as void | Promise<void>);
         }
     }
 

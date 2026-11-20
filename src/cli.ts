@@ -8,6 +8,57 @@ import {
   ENV_VAR_MAPPING,
   TracciaConfig,
 } from './config/config';
+import type {
+  GateBaseline,
+  GateOptions,
+  GateReport,
+  GateRow,
+  ScorerEvidence,
+  ScorerSummary,
+  writeSummary as WriteSummary,
+} from './eval/gate';
+import type { EvaluateOptions, EvaluateResult, ScorerSpec } from './eval/evaluate';
+import type { PricingTable } from './config/pricing-config';
+
+type PricingConfigModule = typeof import('./config/pricing-config');
+
+type CheckOptions = { config?: string; endpoint?: string; apiKey?: string };
+type ConfigInitOptions = { force?: boolean };
+type DoctorOptions = { config?: string };
+type PricingRefreshOptions = { source?: string };
+type EvalOptions = {
+  output: string;
+  dataset: string;
+  name?: string;
+  scorer?: string[];
+  informational?: string[];
+  minPassRate?: number;
+  maxDrop?: number;
+  baselinePrompt?: string;
+  baselineExperiment?: string;
+  baselinePanel?: number;
+  allowDatasetChange?: boolean;
+  allowConcurrencyMismatch?: boolean;
+  maxLatencyIncrease?: number;
+  maxTaskCostIncrease?: number;
+  maxJudgeCostIncrease?: number;
+  prompt?: string;
+  promptVersion?: number;
+  promptLabel?: string;
+};
+
+/** The module passed to `traccia-ts eval`. */
+type TaskScript = {
+  task?: EvaluateOptions['task'];
+  scorers?: Record<string, (input: any) => unknown>;
+};
+
+/** A thrown value, read defensively: it may be an Error, a commander error or anything else. */
+type ThrownValue = { message?: unknown; code?: unknown; exitCode?: unknown; tracciaExit?: number } | null | undefined;
+
+function errorText(err: unknown): string {
+  return String((err as ThrownValue)?.message || err);
+}
 
 const program = new Command();
 program.exitOverride();
@@ -22,7 +73,7 @@ program
   .description('Verify connectivity to ingest endpoint')
   .option('--endpoint <url>', 'Override endpoint URL')
   .option('--api-key <key>', 'API key for authentication')
-  .action(async (options) => {
+  .action(async (options: CheckOptions) => {
     const config = loadConfig(options.config);
     const endpoint = options.endpoint || config.tracing.endpoint;
 
@@ -70,7 +121,7 @@ program
           return;
         }
       } else {
-        console.error(`❌ Connection failed: ${error}`);
+        console.error(`❌ Connection failed: ${String(error)}`);
         console.error(
           '   Make sure the endpoint is running and accessible'
         );
@@ -88,7 +139,7 @@ configCommand
   .command('init')
   .description('Create traccia.toml config file')
   .option('--force', 'Overwrite existing config file')
-  .action((options) => {
+  .action((options: ConfigInitOptions) => {
     const configPath = path.join(process.cwd(), 'traccia.toml');
 
     if (fs.existsSync(configPath) && !options.force) {
@@ -214,7 +265,7 @@ program
   .command('doctor')
   .description('Validate configuration and diagnose issues')
   .option('--config <path>', 'Path to config file')
-  .action((options) => {
+  .action((options: DoctorOptions) => {
     console.log('🩺 Running Traccia configuration diagnostics...\n');
     let issuesFound = 0;
 
@@ -353,8 +404,10 @@ program
   .command('pricing:status')
   .description('Show current pricing source, age, and model count')
   .action(() => {
-    const { getLocalCacheInfo, loadBundledPricing, getBundledGeneratedAt } = require('./config/pricing-config');
-    
+    // Loaded on demand but synchronously, so this command stays synchronous.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getLocalCacheInfo, loadBundledPricing, getBundledGeneratedAt } = require('./config/pricing-config') as PricingConfigModule;
+
     const bundledModels = Object.keys(loadBundledPricing() || {});
     const bundledAge = getBundledGeneratedAt();
     console.log(`Bundled snapshot  : ${bundledModels.length} models, generated_at=${bundledAge || 'unknown'}`);
@@ -379,12 +432,12 @@ program
   .command('pricing:refresh')
   .description('Download the latest pricing and save to local cache')
   .option('--source <source>', 'Force fetching from specific source (upstream)')
-  .action(async (options) => {
-    const { fetchUpstreamPricing, fetchPlatformPricing, writeLocalCache } = require('./config/pricing-config');
-    
+  .action(async (options: PricingRefreshOptions) => {
+    const { fetchUpstreamPricing, fetchPlatformPricing, writeLocalCache } = await import('./config/pricing-config');
+
     const apiKey = process.env.TRACCIA_API_KEY || process.env.AGENT_DASHBOARD_API_KEY;
     
-    let snapshot: { models: Record<string, unknown>; generated_at: string; etag?: string; source_url?: string } | null = null;
+    let snapshot: { models: PricingTable; generated_at: string; etag?: string; source_url?: string } | null = null;
     
     if (options.source !== 'upstream') {
       console.log('Fetching pricing from Traccia platform...');
@@ -394,7 +447,7 @@ program
           console.log('  Platform responded OK.');
         }
       } catch (e) {
-        console.log(`  Could not reach platform: ${e}`);
+        console.log(`  Could not reach platform: ${String(e)}`);
       }
     }
     
@@ -423,7 +476,9 @@ program
   .command('pricing:clear')
   .description('Delete local pricing cache (revert to bundled snapshot)')
   .action(() => {
-    const { clearLocalCache, getCachePath } = require('./config/pricing-config');
+    // Loaded on demand but synchronously, so this command stays synchronous.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { clearLocalCache, getCachePath } = require('./config/pricing-config') as PricingConfigModule;
     if (clearLocalCache()) {
       console.log(`Local pricing cache cleared (${getCachePath()}).`);
     } else {
@@ -431,9 +486,11 @@ program
     }
   });
 
-const realProcessExit = process.exit.bind(process);
+const realProcessExit = process.exit.bind(process) as typeof process.exit;
 
 async function withScriptExits<T>(fn: () => Promise<T>): Promise<T> {
+  // Keep the exact original function so it can be put back unchanged.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
   const previous = process.exit;
   process.exit = ((code?: number) => {
     const error = new Error(
@@ -449,14 +506,14 @@ async function withScriptExits<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function scriptHalted(err: { tracciaExit?: number; message?: string }, output: string, writeSummary: Function) {
+function scriptHalted(err: ThrownValue, output: string, writeSummary: typeof WriteSummary) {
   const message = err.tracciaExit
     ? `The task script exited with status ${err.tracciaExit}`
     : 'The task script exited before the run finished';
   evalFailure(output, 3, 'task_error', message, writeSummary);
 }
 
-function evalFailure(output: string, code: number, name: string, message: string, writeSummary: Function) {
+function evalFailure(output: string, code: number, name: string, message: string, writeSummary: typeof WriteSummary) {
   const body = {
     exit_code: code,
     code: name,
@@ -486,11 +543,36 @@ async function resolveScorerIds(scorers: string[]) {
   return found;
 }
 
-async function loadBaseline(options: any) {
+type PanelMeasurement = {
+  panel_index?: unknown;
+  mean_latency_ms?: number;
+  task_cost_usd?: number;
+  task_cost_coverage?: unknown;
+  judge_cost_usd?: number;
+  judge_cost_coverage?: unknown;
+  judge_definition_hashes?: string[];
+};
+
+type ExperimentRunContext = PanelMeasurement & {
+  dataset_fingerprint?: unknown;
+  dataset_verified?: unknown;
+  scorer_evidence?: ScorerEvidence[];
+  latency_concurrency?: unknown;
+  panel_measurements?: PanelMeasurement[];
+};
+
+/** The experiment record the eval runtime API returns. */
+type ExperimentRecord = {
+  id?: unknown;
+  run_context?: ExperimentRunContext;
+  aggregates?: { panels?: Array<{ panel_index?: unknown; prompt_version_id?: unknown; scorers?: ScorerSummary[] }> };
+};
+
+async function loadBaseline(options: EvalOptions): Promise<GateBaseline> {
   const { fetchExperiment } = await import('./eval/client');
   const { fetchPromptRuntime } = await import('./prompts/client');
-  let experimentId = options.baselineExperiment;
-  let panelIndex = options.baselinePanel;
+  let experimentId: unknown = options.baselineExperiment;
+  let panelIndex: unknown = options.baselinePanel;
   let promptVersionId: string | null = null;
   if (options.baselinePrompt) {
     try {
@@ -503,20 +585,20 @@ async function loadBaseline(options: any) {
       return { missing: true };
     }
   }
-  let experiment: any;
+  let experiment: ExperimentRecord;
   try {
-    experiment = await fetchExperiment(String(experimentId));
+    experiment = (await fetchExperiment(String(experimentId))) as ExperimentRecord;
   } catch {
     return { missing: true };
   }
-  const context = experiment.run_context || {};
+  const context: ExperimentRunContext = experiment.run_context || {};
   const panels = experiment.aggregates?.panels || [];
   if (panelIndex != null && Number(panelIndex) < 0) return { panel_required: true };
   if (panels.length > 1 && panelIndex == null) return { panel_required: true };
   if (panelIndex == null) panelIndex = panels.length ? Number(panels[0].panel_index || 0) : 0;
-  const panel = panels.find((item: any) => Number(item.panel_index || 0) === Number(panelIndex));
+  const panel = panels.find((item) => Number(item.panel_index || 0) === Number(panelIndex));
   if (panels.length && !panel) return { missing: true };
-  let measured: any = null;
+  let measured: PanelMeasurement | null = null;
   for (const item of context.panel_measurements || []) {
     if (item && Number(item.panel_index || 0) === Number(panelIndex)) {
       measured = item;
@@ -565,21 +647,9 @@ program
   .option('--prompt <name>', 'Prompt name to attach as promotion evidence')
   .option('--prompt-version <version>', 'Prompt version number', (value) => Number(value))
   .option('--prompt-label <label>', 'Prompt label, such as production')
-  .action(async (script, options) => {
+  .action(async (script: string, options: EvalOptions) => {
     const { applyBaseline, decide, preflight, reportFromRows, validateBaseline, writeSummary } = await import('./eval/gate');
-    const gateOptions: {
-      scorers: string[];
-      informational: string[];
-      min_pass_rate: number | undefined;
-      max_drop: number | undefined;
-      baseline_prompt: string | undefined;
-      baseline_experiment: string | undefined;
-      max_latency_increase: number | undefined;
-      max_task_cost_increase: number | undefined;
-      max_judge_cost_increase: number | undefined;
-      unhashed_scorers: string[];
-      scorer_ids: Record<string, string>;
-    } = {
+    const gateOptions: GateOptions = {
       scorers: options.scorer || [],
       informational: options.informational || [],
       min_pass_rate: options.minPassRate,
@@ -600,7 +670,7 @@ program
       console.error(early.failures[0].message);
       process.exit(early.exit_code);
     }
-    let baseline: any = null;
+    let baseline: GateBaseline | null = null;
     if (options.baselinePrompt || options.baselineExperiment) {
       baseline = await loadBaseline(options);
       if (options.maxDrop != null) {
@@ -618,16 +688,16 @@ program
       evalFailure(options.output, 130, 'task_error', 'The eval was interrupted', writeSummary);
     };
     process.on('SIGINT', onSigint);
-    let loaded: any;
+    let loaded: TaskScript;
     try {
-      loaded = await withScriptExits(() => import(path.resolve(script)));
-    } catch (err: any) {
-      if (err?.tracciaExit != null) scriptHalted(err, options.output, writeSummary);
-      evalFailure(options.output, 2, 'bad_flags', `Could not load the task script: ${err?.message || err}`, writeSummary);
+      loaded = await withScriptExits(() => import(path.resolve(script)) as Promise<TaskScript>);
+    } catch (err: unknown) {
+      if ((err as ThrownValue)?.tracciaExit != null) scriptHalted(err as ThrownValue, options.output, writeSummary);
+      evalFailure(options.output, 2, 'bad_flags', `Could not load the task script: ${errorText(err)}`, writeSummary);
     }
     const local = loaded.scorers || {};
     const { namedScorer } = await import('./eval/evaluate');
-    const scorers = [];
+    const scorers: ScorerSpec[] = [];
     for (const name of options.scorer || []) {
       if (String(name).startsWith('local:')) {
         const key = String(name).slice('local:'.length);
@@ -650,10 +720,10 @@ program
     let providerKeys: Record<string, string> = {};
     try {
       providerKeys = providerKeysFromEnv();
-    } catch (err: any) {
-      evalFailure(options.output, 2, 'bad_flags', String(err?.message || err), writeSummary);
+    } catch (err: unknown) {
+      evalFailure(options.output, 2, 'bad_flags', errorText(err), writeSummary);
     }
-    let result: any;
+    let result: EvaluateResult;
     try {
       result = await withScriptExits(() => evaluate({
         name: experimentName({ name: options.name, dataset: options.dataset, script }),
@@ -684,16 +754,17 @@ program
             : {}),
         },
       }));
-    } catch (err: any) {
-      if (err?.tracciaExit != null) scriptHalted(err, options.output, writeSummary);
+    } catch (err: unknown) {
+      if ((err as ThrownValue)?.tracciaExit != null) scriptHalted(err as ThrownValue, options.output, writeSummary);
       if (err instanceof EvaluateError) {
         evalFailure(options.output, 2, 'bad_flags', String(err.message || err), writeSummary);
       }
-      evalFailure(options.output, 3, 'task_error', String(err?.message || err), writeSummary);
+      evalFailure(options.output, 3, 'task_error', errorText(err), writeSummary);
     }
     const stored = result.runContext || {};
-    const report: Record<string, any> = {
-      rows: result.rows,
+    const rows = (result.rows || []) as GateRow[];
+    const report: GateReport = {
+      rows: result.rows as GateRow[],
       persist_error: result.persistError,
       dataset_drift: Boolean(stored.dataset_drift),
       dataset_verified: stored.dataset_verified,
@@ -703,9 +774,9 @@ program
       latency_concurrency: stored.latency_concurrency,
       task_errors: result.errors?.length ? 1 : 0,
       scorers: reportFromRows(
-        result.rows || [],
+        rows,
         options.informational || [],
-        (result.rows || []).map((row: any) => row.item_id),
+        rows.map((row) => row.item_id),
         options.scorer || [],
       ),
       min_pass_rate: options.minPassRate,
@@ -733,12 +804,13 @@ function outputFlag(argv: string[]): string | undefined {
 async function runCli(): Promise<void> {
   try {
     await program.parseAsync(process.argv);
-  } catch (err: any) {
-    if (err?.exitCode === 0 || err?.code === 'commander.helpDisplayed' || err?.code === 'commander.help') {
+  } catch (err: unknown) {
+    const thrown = err as ThrownValue;
+    if (thrown?.exitCode === 0 || thrown?.code === 'commander.helpDisplayed' || thrown?.code === 'commander.help') {
       process.exit(0);
     }
-    const usage = typeof err?.code === 'string' && err.code.startsWith('commander.');
-    const message = String(err?.message || err);
+    const usage = typeof thrown?.code === 'string' && thrown.code.startsWith('commander.');
+    const message = errorText(err);
     const auth = /API key/i.test(message);
     const code = usage || auth ? 2 : 3;
     const name = code === 2 ? 'bad_flags' : 'task_error';

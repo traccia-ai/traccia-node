@@ -77,7 +77,7 @@ export function baseName(name: string): string {
 }
 
 function hasOwn(obj: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(obj, key);
+  return Object.prototype.hasOwnProperty.call(obj, key) as boolean;
 }
 
 export function providerOf(key: string, entry: unknown): string {

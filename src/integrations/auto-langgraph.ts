@@ -48,7 +48,7 @@ export function wrapGraphWithTracing(graph: any, options: any = {}): any {
  */
 export function tracedNode(
   nodeName: string,
-  nodeFunction: (state: any) => Promise<any> | any
+  nodeFunction: (state: any) => any
 ): (state: any) => Promise<any> {
   return createTracedNode(nodeName, nodeFunction);
 }
@@ -87,6 +87,7 @@ export function tracedConditional(
  * 
  * const result = await graph.compile().invoke({ input: 'data' });
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; the optional peer is loaded synchronously with require()
 export async function createSimpleTracedGraph(options: {
   nodes: Record<string, (state: any) => Promise<any>>;
   edges: Array<{ from: string; to: string }>;

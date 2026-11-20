@@ -191,7 +191,7 @@ function promptFromAttributes(attributes?: Record<string, unknown> | null): Reco
 
 function promptContext(): Record<string, unknown> {
   const span = getCurrentSpan();
-  const fromSpan = promptFromAttributes(span?.attributes as Record<string, unknown> | undefined);
+  const fromSpan = promptFromAttributes(span?.attributes);
   if (fromSpan.name) {
     return fromSpan;
   }
@@ -292,7 +292,7 @@ function blockedMessage(decision: Record<string, unknown>): string {
     parts.push(`remaining budget $${decision.remaining_budget_usd.toFixed(2)}`);
   }
   if (decision.id) {
-    parts.push(`decision ${decision.id}`);
+    parts.push(`decision ${String(decision.id)}`);
   }
   return parts.join('. ');
 }

@@ -213,7 +213,7 @@ export class BatchSpanProcessor implements ISpanProcessor {
       })
       .then(async () => {
         try {
-          await this.exporter!.export(spans);
+          await this.exporter.export(spans);
         } catch {
           // Export errors are swallowed for resilience
         }
