@@ -8,6 +8,13 @@ import { getTracer, getTracerProvider, init, isTracingStarted, runtimeState } fr
 import { BUILTIN_SCORERS, runBuiltinScorer } from './builtins';
 import * as evalClient from './client';
 import { EvaluateError } from './errors';
+import type { ISpan } from '../types';
+
+/** Message of a thrown value, or the value itself, as text. */
+function errorText(err: unknown): string {
+  const message = (err as { message?: unknown } | null | undefined)?.message;
+  return String(message || err);
+}
 
 async function ensureEvalTracing(opts: {
   apiKey?: string;
@@ -39,7 +46,7 @@ export type ScorerFn = (args: {
   output: unknown;
   expected?: unknown;
   metadata?: unknown;
-}) => unknown | Promise<unknown>;
+}) => unknown; // may return a Promise
 
 export type ScorerSpec = string | ScorerFn;
 export type DataSpec = string | Array<Record<string, unknown>>;
@@ -47,7 +54,7 @@ export type DataSpec = string | Array<Record<string, unknown>>;
 export type EvaluateOptions = {
   name: string;
   data: DataSpec;
-  task: (input: any) => unknown | Promise<unknown>;
+  task: (input: any) => unknown; // may return a Promise
   scorers?: ScorerSpec[];
   prompt?: string;
   maxConcurrency?: number;
@@ -99,9 +106,9 @@ export class EvaluateResult {
     const agg = this.aggregates || {};
     const lines = [
       `Experiment: ${this.name}`,
-      `Items: ${agg.item_count ?? this.rows.length}`,
-      `Pass rate: ${agg.pass_rate}`,
-      `Scored: ${agg.scored_count ?? 0}`,
+      `Items: ${String(agg.item_count ?? this.rows.length)}`,
+      `Pass rate: ${String(agg.pass_rate)}`,
+      `Scored: ${String(agg.scored_count ?? 0)}`,
       `Errors: ${this.errors.length}`,
     ];
     if (this.url) lines.push(`URL: ${this.url}`);
@@ -114,7 +121,7 @@ export class EvaluateResult {
 function snapshotNeedsRefresh(token: unknown, margin = 300): boolean {
   if (typeof token !== 'string' || !token.includes('.')) return false;
   try {
-    const payload = JSON.parse(token.slice(0, token.lastIndexOf('.')));
+    const payload = JSON.parse(token.slice(0, token.lastIndexOf('.'))) as { exp?: unknown } | null;
     const exp = payload && typeof payload.exp === 'number' ? payload.exp : null;
     return exp != null && exp <= Date.now() / 1000 + margin;
   } catch {
@@ -183,7 +190,7 @@ async function runPool<T>(
 ): Promise<void> {
   let next = 0;
   const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (true) {
+    for (;;) {
       const i = next++;
       if (i >= items.length) return;
       await worker(items[i], i);
@@ -208,7 +215,7 @@ function scoreSpanName(spec: ScorerSpec): string {
   return `scorer.${safe || 'unnamed'}`;
 }
 
-function annotateScoreSpan(span: any, scored: Record<string, unknown>): void {
+function annotateScoreSpan(span: ISpan, scored: Record<string, unknown>): void {
   try {
     const name = String(scored.scorer_name || scored.name || '');
     if (name) span.setAttribute('traccia.eval.scorer', name);
@@ -278,7 +285,7 @@ function taskChildCosts(): AsyncLocalStorage<Array<{ cost: number | null }>> {
 
 function ensureChildCostProcessor(): void {
   const state = runtimeState();
-  let provider;
+  let provider: ReturnType<typeof getTracerProvider>;
   try {
     provider = getTracerProvider();
   } catch {
@@ -294,7 +301,7 @@ function ensureChildCostProcessor(): void {
         const name = String(span?.name || '');
         if (name === 'evaluate.item' || name.startsWith('scorer.')) return;
         if (!providerSpan(span)) return;
-        const cost = readCost(span?.attributes as Record<string, unknown> | undefined);
+        const cost = readCost(span?.attributes);
         bucket.push({ cost: cost == null ? null : cost });
       },
       forceFlush() {
@@ -309,7 +316,9 @@ function ensureChildCostProcessor(): void {
   }
 }
 
-function costFromSpan(span: any, childCosts?: Array<{ cost: number | null }>): number | undefined {
+type CostSpan = { name?: string; attributes?: Record<string, unknown>; children?: CostSpan[] };
+
+function costFromSpan(span: CostSpan, childCosts?: Array<{ cost: number | null }>): number | undefined {
   const own = readCost(span?.attributes);
   if (own != null) return own;
   const nested = [...(childCosts || [])];
@@ -447,13 +456,13 @@ export async function evaluate(opts: EvaluateOptions): Promise<EvaluateResult> {
           scored.definition_identity = 'source_fallback';
         }
         return scored;
-      } catch (err: any) {
+      } catch (err: unknown) {
         return {
           name: nm,
           status: 'error',
           passed: null,
           score: null,
-          reason: `scorer_error: ${err?.message || err}`,
+          reason: `scorer_error: ${errorText(err)}`,
           definition_identity: 'source_fallback',
         };
       }
@@ -567,13 +576,13 @@ export async function evaluate(opts: EvaluateOptions): Promise<EvaluateResult> {
                 const scored = await runScorer(spec, row, output);
                 annotateScoreSpan(scoreSpan, scored);
                 scores.push(scored);
-              } catch (err: any) {
+              } catch (err: unknown) {
                 const fail: Record<string, unknown> = {
                   name: specNm,
                   scorer_name: specNm,
                   status: 'error',
                   passed: null,
-                  reason: `scorer_error: ${err?.message || err}`,
+                  reason: `scorer_error: ${errorText(err)}`,
                   score: null,
                 };
                 if (BUILTIN_SCORERS.has(specNm)) fail.type = specNm;
@@ -605,20 +614,20 @@ export async function evaluate(opts: EvaluateOptions): Promise<EvaluateResult> {
         } catch {
           /* ignore */
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         cell.output = '';
-        cell.error = String(err?.message || err);
+        cell.error = errorText(err);
         cell.scores = [];
         cell.passed = false;
         try {
-          span.recordException?.(err);
+          span.recordException?.(err as Error);
         } catch {
           /* ignore */
         }
       }
       try {
         if (tracingOk) {
-          const ctx: any = span.context;
+          const ctx = span.context as { traceId?: unknown; trace_id?: unknown } | undefined;
           const tid = ctx?.traceId || ctx?.trace_id;
           if (tid) cell.trace_id = String(tid);
         }
@@ -656,10 +665,10 @@ export async function evaluate(opts: EvaluateOptions): Promise<EvaluateResult> {
   const latencyVals: number[] = [];
   const costVals: number[] = [];
   for (const r of rows) {
-    for (const p of (r.panels as any[]) || []) {
+    for (const p of (r.panels as Array<Record<string, unknown>>) || []) {
       if (typeof p.latency_ms === 'number' && Number.isFinite(p.latency_ms)) latencyVals.push(p.latency_ms);
       if (typeof p.cost_usd === 'number' && Number.isFinite(p.cost_usd)) costVals.push(p.cost_usd);
-      for (const s of p.scores || []) {
+      for (const s of (p.scores as Array<{ passed?: unknown }>) || []) {
         scoredCount += 1;
         if (s.passed) passCount += 1;
       }
@@ -718,11 +727,11 @@ export async function evaluate(opts: EvaluateOptions): Promise<EvaluateResult> {
         datasetSnapshotToken,
         ...cred,
       });
-      result.url = created.url || null;
+      result.url = (created.url as string) || null;
       result.experimentId = String(created.id || experimentId);
-      result.runContext = created.run_context || runContext;
-    } catch (err: any) {
-      result.persistError = String(err?.message || err);
+      result.runContext = (created.run_context as Record<string, unknown>) || runContext;
+    } catch (err: unknown) {
+      result.persistError = errorText(err);
     }
   }
 

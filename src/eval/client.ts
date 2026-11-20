@@ -6,6 +6,9 @@ import axios from 'axios';
 import { resolveCredentials } from '../prompts/client';
 import { EvaluateError } from './errors';
 
+/** A JSON object returned by the eval runtime API. */
+export type ApiRecord = Record<string, unknown>;
+
 async function request(
   method: 'GET' | 'POST',
   path: string,
@@ -15,13 +18,13 @@ async function request(
     body?: Record<string, unknown>;
     timeout?: number;
   },
-): Promise<any> {
+): Promise<ApiRecord> {
   const { apiKey, baseUrl } = resolveCredentials({
     apiKey: opts?.apiKey,
     promptApiBase: opts?.promptApiBase,
   });
   try {
-    const resp = await axios.request({
+    const resp = await axios.request<ApiRecord>({
       method,
       url: `${baseUrl}${path}`,
       headers: {
@@ -37,9 +40,10 @@ async function request(
       throw new EvaluateError(`Eval runtime ${resp.status}: ${JSON.stringify(detail)}`);
     }
     return resp.data;
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (err instanceof EvaluateError) throw err;
-    throw new EvaluateError(`Eval runtime request failed: ${err?.message || err}`);
+    const message = (err as { message?: unknown } | null | undefined)?.message;
+    throw new EvaluateError(`Eval runtime request failed: ${String(message || err)}`);
   }
 }
 

@@ -34,7 +34,7 @@ function resolveGovernAgentId(explicit?: string): string | undefined {
 function createGovernWrapper(
   fn: AnyFn,
   options: GovernOptions,
-  defaultName: string,
+  _defaultName: string,
 ): AnyFn {
   const { agentId, failOpen, policyFailMode, ...observeOptions } = options;
   const local = localFailMode(failOpen, policyFailMode, 'govern');
@@ -57,7 +57,7 @@ function createGovernWrapper(
     };
     if (agentId?.trim()) identity.agentId = agentId.trim();
     if (agentName) identity.agentName = agentName;
-    return runIdentity(identity, () => governedRun(() => Promise.resolve(observedFn.apply(thisArg, args))));
+    return runIdentity(identity, () => governedRun(() => Promise.resolve(observedFn.apply(thisArg, args) as unknown)));
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -93,7 +93,7 @@ export function govern(options: GovernOptions = {}) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function (target: any, propertyKey?: string, descriptor?: PropertyDescriptor): any {
     if (descriptor && typeof descriptor.value === 'function') {
-      const originalMethod = descriptor.value;
+      const originalMethod = descriptor.value as AnyFn;
       descriptor.value = createGovernWrapper(
         originalMethod,
         options,
@@ -103,7 +103,8 @@ export function govern(options: GovernOptions = {}) {
     }
 
     if (typeof target === 'function' && !propertyKey && !descriptor) {
-      return createGovernWrapper(target, options, options.name || target.name || 'function');
+      const targetFn = target as AnyFn;
+      return createGovernWrapper(targetFn, options, options.name || targetFn.name || 'function');
     }
 
     return target;

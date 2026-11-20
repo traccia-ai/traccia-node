@@ -215,7 +215,9 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   }
 
   if (config.serviceRole) {
-    const providerAny = basicProvider as any;
+    const providerAny = basicProvider as unknown as {
+      resource?: { attributes?: Record<string, unknown> };
+    };
     if (providerAny.resource && providerAny.resource.attributes) {
       providerAny.resource.attributes['traccia.service_role'] = config.serviceRole;
     }
@@ -295,7 +297,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   const frameworks = config.compliance?.frameworks || [];
   const euRiskTier =
     frameworks.includes("eu_ai_act") || config.compliance?.risk_tier
-      ? (config.compliance?.risk_tier as string | undefined)
+      ? (config.compliance?.risk_tier)
       : undefined;
   const hipaaEnabled = frameworks.includes("hipaa");
   provider.addSpanProcessor(new GovernanceEnrichmentProcessor({ euRiskTier, hipaaEnabled }));

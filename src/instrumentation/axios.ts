@@ -121,7 +121,7 @@ export function patchAxios(): boolean {
 
                 const method = String(config.method || 'GET').toUpperCase();
                 const url = config.url as string | undefined;
-                const status = (response as Record<string, unknown>).status as number | undefined;
+                const status = (response).status as number | undefined;
 
                 // Skip Traccia platform bookkeeping / OTLP (same policy as Python requests patch)
                 const urlStr = String(url || '');
@@ -129,7 +129,7 @@ export function patchAxios(): boolean {
                     return response;
                 }
 
-                tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
+                void tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
                     span.setAttribute('span.type', 'TOOL');
                     span.setAttribute('http.method', method);
 
@@ -167,10 +167,10 @@ export function patchAxios(): boolean {
                 const method = String(config.method || 'GET').toUpperCase();
                 const url = config.url as string | undefined;
                 const status = error.response
-                    ? ((error.response as Record<string, unknown>).status as number | undefined)
+                    ? ((error.response).status as number | undefined)
                     : undefined;
 
-                tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
+                void tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
                     span.setAttribute('span.type', 'TOOL');
                     span.setAttribute('http.method', method);
 
@@ -252,7 +252,7 @@ function recordAxiosSpan(response: Record<string, unknown>): void {
     const url = config.url as string | undefined;
     const status = response.status as number | undefined;
 
-    tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
+    void tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
         span.setAttribute('span.type', 'TOOL');
         span.setAttribute('http.method', method);
 
@@ -284,10 +284,10 @@ function recordAxiosErrorSpan(
     const method = String(config.method || 'GET').toUpperCase();
     const url = config.url as string | undefined;
     const status = error.response
-        ? ((error.response as Record<string, unknown>).status as number | undefined)
+        ? ((error.response).status as number | undefined)
         : undefined;
 
-    tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
+    void tracer.startActiveSpan(`http.${method}`, (span: ISpan) => {
         span.setAttribute('span.type', 'TOOL');
         span.setAttribute('http.method', method);
 

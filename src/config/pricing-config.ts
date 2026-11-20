@@ -28,6 +28,15 @@ export interface PricingTable {
   [model: string]: PricingRates;
 }
 
+/** Shape of a pricing snapshot file or platform response, as parsed from JSON. */
+interface PricingFile {
+  models?: PricingTable;
+  generated_at?: string;
+  etag?: string;
+  source?: string;
+  source_url?: string;
+}
+
 export type PricingSource = 'default' | 'env' | 'override' | 'bundled' | 'local_cache';
 
 /**
@@ -74,7 +83,7 @@ export function readBundledSnapshot(): BundledSnapshot | null {
       if (!fs.existsSync(candidate)) {
         continue;
       }
-      const data = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(candidate, 'utf-8')) as PricingFile | null;
       const models = data?.models;
       if (!models || typeof models !== 'object' || Array.isArray(models) || !Object.keys(models).length) {
         continue;
@@ -114,7 +123,7 @@ function validTimestamp(value: unknown): string | null {
 export async function fetchUpstreamPricing(): Promise<{ models: PricingTable; generated_at: string } | null> {
   const url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
   try {
-    const response = await axios.get(url, {
+    const response = await axios.get<Record<string, unknown>>(url, {
       headers: { "User-Agent": "traccia-cli/1.0" },
       timeout: 10000,
     });
@@ -151,7 +160,7 @@ export async function fetchPlatformPricing(apiKey?: string): Promise<{ models: P
   const pricingUrl = `${apiBase.replace(/\/+$/, '')}/v1/pricing/latest`;
 
   try {
-    const response = await axios.get(pricingUrl, {
+    const response = await axios.get<PricingFile>(pricingUrl, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       timeout: 5000,
     });
@@ -195,7 +204,7 @@ export function getLocalCacheInfo(): { path: string; model_count: number; genera
     if (!fs.existsSync(cachePath)) {
       return null;
     }
-    const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+    const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as PricingFile;
     return {
       path: cachePath,
       model_count: Object.keys(data.models || {}).length,
@@ -241,6 +250,7 @@ export function fetchRemotePricing(): Promise<PricingTable> {
  * none), never the load time. Without a snapshot the source is 'default' and the
  * table is empty, so models stay unpriced.
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; loading is synchronous today
 export async function loadPricingWithSource(
   override?: PricingTable
 ): Promise<[PricingTable, PricingSource, string]> {

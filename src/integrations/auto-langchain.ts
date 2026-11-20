@@ -41,7 +41,7 @@ export function getTraciaHandler(): TracciaCallbackHandler {
  * const response = await tracedModel.invoke({ input: 'Hello' });
  * // Automatically traced!
  */
-export function withTracing<T extends any>(component: T): T {
+export function withTracing<T>(component: T): T {
   const handler = getTraciaHandler();
   
   // For models and chains, add the handler to callbacks
@@ -68,6 +68,7 @@ export function withTracing<T extends any>(component: T): T {
  * const model = createTracedOpenAI({ modelName: 'gpt-4' });
  * const response = await model.invoke({ input: 'Hello' });
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; the optional peer is loaded synchronously with require()
 export async function createTracedOpenAI(config: any): Promise<any> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -93,6 +94,7 @@ export async function createTracedOpenAI(config: any): Promise<any> {
  * 
  * const result = await executor.invoke({ input: 'What time is it?' });
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; the optional peer is loaded synchronously with require()
 export async function createTracedAgentExecutor(options: {
   agent: any;
   tools: any[];
@@ -129,6 +131,7 @@ export async function createTracedAgentExecutor(options: {
  * 
  * const result = await chain.invoke({ question: 'Hello?' });
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; the optional peer is loaded synchronously with require()
 export async function createTracedLLMChain(options: {
   llm: any;
   prompt: any;
@@ -239,7 +242,10 @@ export async function setupLangChainWithTracing(options: {
     if (tools.length > 0) {
       try {
         // Try to create agent with tools
+        // Optional peers, loaded only when tools are passed.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const langchainAgents = require('langchain/agents');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const langchainCore = require('@langchain/core/prompts');
 
         // Create prompt

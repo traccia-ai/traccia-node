@@ -24,24 +24,25 @@ export function install(enabled?: boolean): boolean {
     }
 
     const { Agent, Crew, Task } = crewai;
+    // Lazy: the package index imports this module, so a top-level import would be circular.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const traccia = require("../../index");
 
     // Wrap Crew methods
     if (Crew && Crew.prototype) {
       const originalKickoff = Crew.prototype.kickoff;
       if (originalKickoff) {
-        Crew.prototype.kickoff = function (...args: unknown[]) {
+        Crew.prototype.kickoff = function (this: unknown, ...args: unknown[]) {
           const tracer = traccia.getTracer("crewai");
-          const crew = this;
           const attributes: Record<string, unknown> = {
-            "crewai.crew.id": String((crew as { id?: string }).id || ""),
+            "crewai.crew.id": String((this as { id?: string }).id || ""),
             "crewai.type": "crew",
           };
 
           const span = tracer.startSpan("crewai.crew.kickoff", attributes);
 
           try {
-            const result = originalKickoff.apply(crew, args);
+            const result = originalKickoff.apply(this, args);
             span.setAttribute("crewai.crew.output", String(result).slice(0, 1000));
             return result;
           } catch (e) {
@@ -57,18 +58,17 @@ export function install(enabled?: boolean): boolean {
 
       const originalKickoffAsync = Crew.prototype.kickoffAsync;
       if (originalKickoffAsync) {
-        Crew.prototype.kickoffAsync = async function (...args: unknown[]) {
+        Crew.prototype.kickoffAsync = async function (this: unknown, ...args: unknown[]) {
           const tracer = traccia.getTracer("crewai");
-          const crew = this;
           const attributes: Record<string, unknown> = {
-            "crewai.crew.id": String((crew as { id?: string }).id || ""),
+            "crewai.crew.id": String((this as { id?: string }).id || ""),
             "crewai.type": "crew",
           };
 
           const span = tracer.startSpan("crewai.crew.kickoff_async", attributes);
 
           try {
-            const result = await originalKickoffAsync.apply(crew, args);
+            const result = await originalKickoffAsync.apply(this, args);
             span.setAttribute("crewai.crew.output", String(result).slice(0, 1000));
             return result;
           } catch (e) {
@@ -87,12 +87,11 @@ export function install(enabled?: boolean): boolean {
     if (Task && Task.prototype) {
       const originalExecuteSync = Task.prototype.execute_sync;
       if (originalExecuteSync) {
-        Task.prototype.execute_sync = function (...args: unknown[]) {
+        Task.prototype.execute_sync = function (this: unknown, ...args: unknown[]) {
           const tracer = traccia.getTracer("crewai");
-          const task = this;
-          const taskName = (task as { name?: string }).name || (task as { description?: string }).description || "task";
+          const taskName = (this as { name?: string }).name || (this as { description?: string }).description || "task";
           const attributes: Record<string, unknown> = {
-            "crewai.task.id": String((task as { id?: string }).id || ""),
+            "crewai.task.id": String((this as { id?: string }).id || ""),
             "crewai.type": "task",
             "crewai.task.name": String(taskName).slice(0, 50),
           };
@@ -100,7 +99,7 @@ export function install(enabled?: boolean): boolean {
           const span = tracer.startSpan(`crewai.task.${taskName}`, attributes);
 
           try {
-            const result = originalExecuteSync.apply(task, args);
+            const result = originalExecuteSync.apply(this, args);
             return result;
           } catch (e) {
             const error = e as Error;
@@ -118,12 +117,11 @@ export function install(enabled?: boolean): boolean {
     if (Agent && Agent.prototype) {
       const originalExecuteTask = Agent.prototype.execute_task;
       if (originalExecuteTask) {
-        Agent.prototype.execute_task = function (...args: unknown[]) {
+        Agent.prototype.execute_task = function (this: unknown, ...args: unknown[]) {
           const tracer = traccia.getTracer("crewai");
-          const agent = this;
-          const agentRole = (agent as { role?: string }).role || "agent";
+          const agentRole = (this as { role?: string }).role || "agent";
           const attributes: Record<string, unknown> = {
-            "crewai.agent.id": String((agent as { id?: string }).id || ""),
+            "crewai.agent.id": String((this as { id?: string }).id || ""),
             "crewai.type": "agent",
             "crewai.agent.role": agentRole,
           };
@@ -131,7 +129,7 @@ export function install(enabled?: boolean): boolean {
           const span = tracer.startSpan(`crewai.agent.${agentRole}`, attributes);
 
           try {
-            const result = originalExecuteTask.apply(agent, args);
+            const result = originalExecuteTask.apply(this, args);
             span.setAttribute("crewai.agent.result", String(result).slice(0, 1000));
             return result;
           } catch (e) {

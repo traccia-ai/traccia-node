@@ -67,7 +67,7 @@ export class Tracer implements ITracer {
     }
 
     const otelOptions: OTelSpanOptions = {
-      attributes: options?.attributes as any,
+      attributes: options?.attributes as OTelSpanOptions['attributes'],
     };
 
     const otelSpan = this.otelTracer.startSpan(name, otelOptions, activeContext);

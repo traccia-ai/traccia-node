@@ -82,7 +82,7 @@ export function runBuiltinScorer(
     const text = opts.output.trim();
     if (!text) return stamped(name, { passed: false, reason: 'empty', score: 0 });
     try {
-      const parsed = JSON.parse(text);
+      const parsed: unknown = JSON.parse(text);
       if (parsed && typeof parsed === 'object') {
         return stamped(name, { passed: true, reason: null, score: 1 });
       }

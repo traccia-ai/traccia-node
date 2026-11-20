@@ -2,6 +2,8 @@
  * Traccia integration for OpenAI Agents SDK.
  */
 
+import { TracciaAgentsTracingProcessor } from "./processor";
+
 let installed = false;
 
 /**
@@ -24,7 +26,6 @@ export function install(enabled?: boolean): boolean {
     }
 
     // Create and register the processor
-    const { TracciaAgentsTracingProcessor } = require("./processor");
     const processor = new TracciaAgentsTracingProcessor();
     agents.addTraceProcessor(processor);
 

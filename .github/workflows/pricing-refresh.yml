@@ -1,0 +1,129 @@
+name: Refresh pricing snapshot
+
+# Daily: copy traccia-py's data/pricing_snapshot.json (built there from LiteLLM) and,
+# if any price changed, open (or update) a pull request with a summary of the changes.
+# Both SDKs ship the same prices, and only through a reviewed PR; releases never fetch them.
+#
+# Two jobs so that no job both runs project code and holds write access:
+#   build  runs the script from main, read-only, and hands the result over as an artifact;
+#   pr     pushes that file and opens the PR, running only git and gh.
+on:
+  schedule:
+    - cron: '0 7 * * *'  # daily, so a merged traccia-py price update arrives within a day
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pricing-refresh
+  cancel-in-progress: false
+
+env:
+  BRANCH: pricing/refresh
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    # Only the reviewed script on main; a manual run from another branch does nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '20.x'
+
+      # Plain Node script with no dependencies, so no npm install.
+      - name: Copy snapshot from traccia-py
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          node scripts/build-pricing-snapshot.mjs --summary "$RUNNER_TEMP/out/summary.md"
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet -- data/pricing_snapshot.json; then
+            echo "Prices unchanged; nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            cp data/pricing_snapshot.json "$RUNNER_TEMP/out/"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: pricing
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+
+  pr:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write       # push the pricing/refresh branch
+      pull-requests: write  # open the pull request
+      actions: write        # start the tests on that branch (see below)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: pricing
+          path: ${{ runner.temp }}/pricing
+
+      - name: Open or update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          new="$RUNNER_TEMP/pricing/pricing_snapshot.json"
+          ref=$(jq -r '.source_ref' "$new")
+          if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected source_ref in the new snapshot"
+            exit 1
+          fi
+          ref=${ref:0:7}
+          # If the pricing branch already has these prices, don't push again: that would
+          # restart its checks and can dismiss approvals. Still make sure its PR and test
+          # run exist, in case an earlier run failed after pushing.
+          same=false
+          if git fetch --quiet origin "$BRANCH" 2>/dev/null; then
+            git show FETCH_HEAD:data/pricing_snapshot.json > "$RUNNER_TEMP/pending.json"
+            if jq -e --slurpfile a "$new" '[.models, .retained] == [$a[0].models, $a[0].retained]' "$RUNNER_TEMP/pending.json" >/dev/null; then
+              same=true
+            fi
+          fi
+          if [ "$same" = true ]; then
+            echo "The pricing branch already has these prices; not pushing."
+            sha=$(git rev-parse FETCH_HEAD)
+          else
+            cp "$new" data/pricing_snapshot.json
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -B "$BRANCH"
+            git commit -m "chore(pricing): copy snapshot from traccia-py (LiteLLM $ref)" -- data/pricing_snapshot.json
+            git push --force origin "$BRANCH"
+            sha=$(git rev-parse HEAD)
+          fi
+          title="Refresh pricing snapshot (LiteLLM $ref)"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pricing/summary.md"
+          elif [ "$same" = false ]; then
+            gh pr edit "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pricing/summary.md"
+          fi
+          # Pull requests opened by GITHUB_TOKEN don't start other workflows, so start the
+          # tests on the branch directly. Their checks land on the PR's commit.
+          if [ "$(gh run list --workflow pr-test.yml --commit "$sha" --json databaseId --jq length)" = 0 ]; then
+            gh workflow run pr-test.yml --ref "$BRANCH"
+          fi
