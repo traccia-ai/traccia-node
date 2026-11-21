@@ -4,9 +4,10 @@
  * exactly the same prices. traccia-py builds it from LiteLLM, pinned to one LiteLLM
  * commit (see traccia-py/scripts/build_pricing_snapshot.py).
  *
- * The snapshot is committed and shipped as-is; releases never fetch it. The
- * "Refresh pricing snapshot" workflow runs this weekly and opens a pull request,
- * so price changes are reviewed and tested before they ship. To run it by hand:
+ * The snapshot is committed and shipped as-is; releases never fetch it. Run this in every
+ * version bump PR, after releasing traccia-py (whose bump PR refreshes the prices), so
+ * each release ships fresh, reviewed prices (npm-publish.yml refuses a snapshot older
+ * than 14 days):
  *     npm run pricing:snapshot                       # traccia-py main
  *     npm run pricing:snapshot -- --ref <sha>        # a specific traccia-py commit
  *
@@ -151,9 +152,10 @@ async function main() {
   if (values.summary) {
     writeFileSync(values.summary, summarize(models, previous || {}, url, snapshot.source_url), 'utf-8');
   }
+  // Written even when prices are unchanged, so generated_at matches traccia-py's (when the
+  // prices were last checked against LiteLLM), which is what the release age check reads.
   if (isDeepStrictEqual(models, previous)) {
-    console.log('  Prices unchanged; snapshot left as is');
-    return;
+    console.log('  Prices unchanged; updating generated_at and source_ref from traccia-py');
   }
 
   mkdirSync(dirname(OUTPUT), { recursive: true });

@@ -20,7 +20,7 @@ import { FileExporter } from './exporter/file-exporter';
 import { loadConfig } from './config/config';
 import { setClientConfig, clearClientConfig } from './config/client-config';
 import { loadEnvFile, findAgentConfigPath } from './config/env-config';
-import { loadPricingWithSource } from './config/pricing-config';
+import { getActiveSourceRef, loadPricingWithSource } from './config/pricing-config';
 import { resolveServiceName } from './config/service-name';
 import {
   updateConfig,
@@ -276,6 +276,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
       pricingTable: pricing,
       pricingSource,
       pricingGeneratedAt,
+      pricingSourceRef: getActiveSourceRef(),
     });
     provider.addSpanProcessor(costProcessor);
     setResolver(new CostResolver(pricing, pricingSource, pricingGeneratedAt));

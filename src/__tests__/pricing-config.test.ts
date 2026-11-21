@@ -19,6 +19,8 @@ import {
     loadPricingWithSource,
     loadPricing,
     snapshotAgeDays,
+    checkSnapshot,
+    TRACCIA_PRICING_SNAPSHOT_URL,
 } from '../config/pricing-config';
 
 describe('pricing-config', () => {
@@ -171,61 +173,80 @@ describe('pricing-config', () => {
     });
 
     describe('fetchUpstreamPricing', () => {
-        it('converts per-token cost to per-1K and builds the models table', async () => {
-            mockAxiosGet.mockResolvedValue({
-                data: {
-                    'gpt-4': { input_cost_per_token: 0.00003, output_cost_per_token: 0.00006 },
-                    'no-pricing-model': { some_other_field: true },
-                },
-            });
+        // The real shipped snapshot (fs is mocked in this file).
+        const realFs = jest.requireActual<typeof import('fs')>('fs');
+        const shipped = () =>
+            JSON.parse(
+                realFs.readFileSync(require('path').join(__dirname, '..', '..', 'data', 'pricing_snapshot.json'), 'utf-8'),
+            ) as { models: Record<string, Record<string, unknown>>; generated_at: string };
+
+        beforeEach(() => {
+            mockExistsSync.mockReturnValue(false); // no bundled snapshot to compare against
+            jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        });
+
+        afterEach(() => {
+            (console.error as jest.Mock).mockRestore();
+        });
+
+        it("downloads traccia's reviewed snapshot from traccia-py main", async () => {
+            const snap = { ...shipped(), source_ref: 'a'.repeat(40) };
+            mockAxiosGet.mockResolvedValue({ data: snap });
 
             const result = await fetchUpstreamPricing();
 
+            expect(mockAxiosGet).toHaveBeenCalledWith(TRACCIA_PRICING_SNAPSHOT_URL, expect.anything());
             expect(result).not.toBeNull();
-            expect(result!.models['gpt-4'].inputCost).toBeCloseTo(0.03);
-            expect(result!.models['gpt-4'].outputCost).toBeCloseTo(0.06);
-            expect(result!.models['no-pricing-model']).toBeUndefined();
-            expect(typeof result!.generated_at).toBe('string');
+            expect(result!.models).toEqual(snap.models);
+            expect(result!.source).toBe('traccia-py');
+            expect(result!.source_ref).toBe('a'.repeat(40));
+            expect(result!.generated_at).toBe(snap.generated_at);
         });
 
-        it('defaults inputCost/outputCost to 0 when only one of input/output cost is present', async () => {
-            mockAxiosGet.mockResolvedValue({
-                data: {
-                    'input-only': { input_cost_per_token: 0.00001 },
-                },
-            });
+        it('rejects a snapshot with an invalid price', async () => {
+            const snap = shipped();
+            snap.models['gpt-4o'].prompt = -1;
+            mockAxiosGet.mockResolvedValue({ data: snap });
 
-            const result = await fetchUpstreamPricing();
-
-            expect(result!.models['input-only']).toEqual({ inputCost: 0.01, outputCost: 0 });
+            expect(await fetchUpstreamPricing()).toBeNull();
         });
 
-        it('treats a zero-valued cost-per-token as falsy, defaulting that side to 0', async () => {
-            mockAxiosGet.mockResolvedValue({
-                data: {
-                    'free-model': { input_cost_per_token: 0, output_cost_per_token: 0.00002 },
-                },
-            });
+        it('rejects a body that is not JSON (e.g. contains NaN)', async () => {
+            mockAxiosGet.mockResolvedValue({ data: '{"models": {"gpt-4o": {"prompt": NaN}}}' });
 
-            const result = await fetchUpstreamPricing();
-
-            expect(result!.models['free-model']).toEqual({ inputCost: 0, outputCost: 0.02 });
+            expect(await fetchUpstreamPricing()).toBeNull();
         });
 
-        it('skips non-object entries in the raw response', async () => {
-            mockAxiosGet.mockResolvedValue({
-                data: { sample_spec: 'a string, not an object' },
-            });
+        it('rejects a snapshot with too few models', async () => {
+            mockAxiosGet.mockResolvedValue({ data: { models: { 'gpt-4o': { prompt: 1, completion: 1 } } } });
 
-            const result = await fetchUpstreamPricing();
-
-            expect(result!.models).toEqual({});
+            expect(await fetchUpstreamPricing()).toBeNull();
         });
 
         it('returns null when the request fails', async () => {
             mockAxiosGet.mockRejectedValue(new Error('network error'));
 
             expect(await fetchUpstreamPricing()).toBeNull();
+        });
+    });
+
+    describe('checkSnapshot', () => {
+        it.each([NaN, Infinity, -1, true, '0.1', null])('rejects the price %p, strict or not', (bad) => {
+            const models = { m: { prompt: 1, cached_prompt: bad } };
+            expect(checkSnapshot(models, null, false).join()).toContain('not a finite number');
+        });
+
+        it('ignores metadata fields and accepts a small table when not strict', () => {
+            expect(checkSnapshot({ m: { prompt: 0, _provider: 'x', _max_tokens: 'n/a' } }, null, false)).toEqual([]);
+        });
+
+        it('applies the size, drop and required-model checks when strict', () => {
+            const previous = Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`m${i}`, { prompt: 1 }]));
+            const problems = checkSnapshot({ x: { prompt: 1, completion: 1 } }, previous).join('\n');
+            expect(problems).toContain('only 1 models');
+            expect(problems).toContain('model count fell');
+            expect(problems).toContain('gpt-4o is missing');
+            expect(checkSnapshot({})).toEqual(['no models']);
         });
     });
 
@@ -262,7 +283,7 @@ describe('pricing-config', () => {
         it('extracts and strips quotes from the ETag header', async () => {
             mockAxiosGet.mockResolvedValue({
                 status: 200,
-                data: { models: {}, generated_at: '2026-01-01' },
+                data: { models: { 'gpt-4': { prompt: 1, completion: 2 } }, generated_at: '2026-01-01' },
                 headers: { ETag: '"abc123"' },
             });
 
@@ -271,13 +292,22 @@ describe('pricing-config', () => {
             expect(result!.etag).toBe('abc123');
         });
 
-        it('defaults models to {} and generated_at to now when the response omits them', async () => {
-            mockAxiosGet.mockResolvedValue({ status: 200, data: {}, headers: {} });
+        it('defaults generated_at to now when the response omits it', async () => {
+            mockAxiosGet.mockResolvedValue({ status: 200, data: { models: { 'gpt-4': { prompt: 1 } } }, headers: {} });
 
             const result = await fetchPlatformPricing();
 
-            expect(result!.models).toEqual({});
             expect(typeof result!.generated_at).toBe('string');
+        });
+
+        it('returns null (so the CLI falls back to GitHub) when there are no models or a price is invalid', async () => {
+            jest.spyOn(console, 'error').mockImplementation(() => undefined);
+            mockAxiosGet.mockResolvedValue({ status: 200, data: {}, headers: {} });
+            expect(await fetchPlatformPricing()).toBeNull();
+
+            mockAxiosGet.mockResolvedValue({ status: 200, data: { models: { 'gpt-4': { prompt: NaN } } }, headers: {} });
+            expect(await fetchPlatformPricing()).toBeNull();
+            (console.error as jest.Mock).mockRestore();
         });
 
         it('returns null when the request fails', async () => {

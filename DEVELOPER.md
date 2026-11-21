@@ -341,17 +341,19 @@ npm pack
 
 ### Publish to npm
 
-```bash
-# Update version
-npm version patch|minor|major
+Only `.github/workflows/npm-publish.yml` can publish; `npm publish` from a laptop is
+disabled (the package only accepts trusted publishing).
 
-# Publish
-npm publish --access public
-
-# Tag release
-git tag v1.0.0
-git push origin v1.0.0
-```
+1. Release traccia-py first (its version bump PR refreshes the prices from LiteLLM).
+2. In one pull request here: bump `version` in `package.json`
+   (`npm version patch --no-git-tag-version`), update `CHANGELOG.md`, and copy the prices
+   with `npm run pricing:snapshot -- --summary pricing.md` (paste `pricing.md` into the PR
+   description, don't commit it). Merge it once the tests pass.
+3. Publish a GitHub release on `main` with tag `vX.Y.Z` (matching `package.json`) and your notes.
+4. `npm-publish.yml` runs the tests, builds the package, and waits for approval in the `npm`
+   environment before publishing with npm trusted publishing (no npm token). It stops if the
+   tag doesn't match the version, the version is already on npm, or the bundled prices are
+   more than 14 days old.
 
 ## Version Management
 

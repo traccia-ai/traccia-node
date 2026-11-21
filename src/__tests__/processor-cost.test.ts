@@ -66,6 +66,22 @@ describe('CostAnnotatingProcessor alignment', () => {
     expect(span.attributes['llm.pricing.model_key']).toBe('gpt-4o');
   });
 
+  it('records the LiteLLM commit when known, and clears it when the new table has none', () => {
+    const proc = new CostAnnotatingProcessor({
+      pricingTable: { 'gpt-4o': { inputCost: 0.005, outputCost: 0.015 } },
+      pricingSourceRef: 'a'.repeat(40),
+    });
+    const usage = { 'llm.model': 'gpt-4o', 'llm.usage.prompt_tokens': 10, 'llm.usage.completion_tokens': 5 };
+    const span = new FakeSpan({ ...usage });
+    proc.onEnd(span);
+    expect(span.attributes['llm.pricing.source_ref']).toBe('a'.repeat(40));
+
+    proc.updatePricingTable({ 'gpt-4o': { inputCost: 0.005, outputCost: 0.015 } }, undefined, undefined, null);
+    const later = new FakeSpan({ ...usage });
+    proc.onEnd(later);
+    expect(later.attributes['llm.pricing.source_ref']).toBeUndefined();
+  });
+
   it('preserves llm.usage.source and sets llm.cost.source alias', () => {
     const proc = makeProcessor();
     const span = new FakeSpan({

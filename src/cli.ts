@@ -18,7 +18,7 @@ import type {
   writeSummary as WriteSummary,
 } from './eval/gate';
 import type { EvaluateOptions, EvaluateResult, ScorerSpec } from './eval/evaluate';
-import type { PricingTable } from './config/pricing-config';
+import type { PricingSnapshot } from './config/pricing-config';
 
 type PricingConfigModule = typeof import('./config/pricing-config');
 
@@ -406,11 +406,15 @@ program
   .action(() => {
     // Loaded on demand but synchronously, so this command stays synchronous.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getLocalCacheInfo, loadBundledPricing, getBundledGeneratedAt } = require('./config/pricing-config') as PricingConfigModule;
+    const { getLocalCacheInfo, loadBundledPricing, getBundledGeneratedAt, readBundledSnapshot } = require('./config/pricing-config') as PricingConfigModule;
 
     const bundledModels = Object.keys(loadBundledPricing() || {});
     const bundledAge = getBundledGeneratedAt();
     console.log(`Bundled snapshot  : ${bundledModels.length} models, generated_at=${bundledAge || 'unknown'}`);
+    const bundledRef = readBundledSnapshot()?.sourceRef;
+    if (bundledRef) {
+      console.log(`  LiteLLM commit  : ${bundledRef}`);
+    }
     console.log(`  (Bundled at SDK install time; refreshed on each SDK release.)`);
 
     const info = getLocalCacheInfo();
@@ -420,6 +424,9 @@ program
       console.log(`  source          : ${info.source}`);
       if (info.source_url) {
         console.log(`  source_url      : ${info.source_url}`);
+      }
+      if (info.source_ref) {
+        console.log(`  LiteLLM commit  : ${info.source_ref}`);
       }
     } else {
       console.log('\nLocal cache       : NOT PRESENT');
@@ -431,13 +438,13 @@ program
 program
   .command('pricing:refresh')
   .description('Download the latest pricing and save to local cache')
-  .option('--source <source>', 'Force fetching from specific source (upstream)')
+  .option('--source <source>', "Use 'upstream' to fetch traccia's reviewed snapshot from GitHub, skipping the platform")
   .action(async (options: PricingRefreshOptions) => {
     const { fetchUpstreamPricing, fetchPlatformPricing, writeLocalCache } = await import('./config/pricing-config');
 
     const apiKey = process.env.TRACCIA_API_KEY || process.env.AGENT_DASHBOARD_API_KEY;
     
-    let snapshot: { models: PricingTable; generated_at: string; etag?: string; source_url?: string } | null = null;
+    let snapshot: PricingSnapshot | null = null;
     
     if (options.source !== 'upstream') {
       console.log('Fetching pricing from Traccia platform...');
@@ -452,23 +459,20 @@ program
     }
     
     if (!snapshot) {
-      if (options.source === 'upstream' || !snapshot) {
-        console.log('Fetching from upstream pricing source...');
-        snapshot = await fetchUpstreamPricing();
-        if (snapshot) {
-          snapshot = { ...snapshot, source_url: 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json' };
-        }
-      }
+      // The same reviewed snapshot the SDK ships, as merged on traccia-py main.
+      console.log("Fetching traccia's reviewed pricing snapshot from GitHub...");
+      snapshot = await fetchUpstreamPricing();
     }
     
     if (!snapshot) {
-      console.log('Failed to fetch pricing from both platform and upstream source.');
+      console.log('Failed to fetch pricing from both the platform and GitHub. The current cache (or bundled snapshot) stays in use.');
       process.exit(1);
       return;
     }
     
     const cachePath = writeLocalCache(snapshot);
-    console.log(`Pricing refreshed: ${Object.keys(snapshot.models).length} models`);
+    const ref = snapshot.source_ref ? `, LiteLLM commit ${snapshot.source_ref.slice(0, 7)}` : '';
+    console.log(`Pricing refreshed: ${Object.keys(snapshot.models).length} models, generated_at=${snapshot.generated_at}${ref}`);
     console.log(`Saved to: ${cachePath}`);
   });
 
