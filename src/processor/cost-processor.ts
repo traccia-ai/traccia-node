@@ -15,6 +15,8 @@ export interface CostAnnotatingProcessorOptions {
   pricingTable?: PricingTable;
   pricingSource?: string;
   pricingGeneratedAt?: string;
+  /** LiteLLM commit the pricing snapshot was built from, when known. */
+  pricingSourceRef?: string | null;
 }
 
 /**
@@ -71,6 +73,7 @@ function readTokenCount(
 export class CostAnnotatingProcessor implements ISpanProcessor {
   private pricingSource: string;
   private pricingGeneratedAt: string;
+  private pricingSourceRef: string | null;
 
   constructor(options: CostAnnotatingProcessorOptions = {}) {
     if (options.pricingTable) {
@@ -83,14 +86,20 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
     const resolver = getResolver();
     this.pricingSource = options.pricingSource ?? resolver.getSource;
     this.pricingGeneratedAt = options.pricingGeneratedAt ?? resolver.getGeneratedAt;
+    this.pricingSourceRef = options.pricingSourceRef ?? null;
   }
 
   updatePricingTable(
     pricingTable: PricingTable,
     pricingSource?: string,
     pricingGeneratedAt?: string,
+    /** null means the new table's commit is unknown; omit it to keep the current one. */
+    pricingSourceRef?: string | null,
   ): void {
     getResolver().update(pricingTable, pricingSource, pricingGeneratedAt);
+    if (pricingSourceRef !== undefined) {
+      this.pricingSourceRef = pricingSourceRef;
+    }
     if (pricingSource) {
       this.pricingSource = pricingSource;
     }
@@ -174,6 +183,9 @@ export class CostAnnotatingProcessor implements ISpanProcessor {
         span.setAttribute('llm.pricing.age_days', Math.floor(ageDays));
       }
       span.setAttribute('llm.pricing.snapshot_version', this.pricingGeneratedAt);
+      if (this.pricingSourceRef) {
+        span.setAttribute('llm.pricing.source_ref', this.pricingSourceRef);
+      }
     } catch {
       // Silently fail
     }

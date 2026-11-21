@@ -57,6 +57,21 @@ jobs:
             exit 1
           fi
 
+      # The bundled prices are copied from traccia-py in the version bump PR
+      # (npm run pricing:snapshot); this refuses a release whose prices weren't
+      # checked against LiteLLM in the last 14 days.
+      - name: Check pricing snapshot is fresh
+        run: |
+          node -e '
+            const generatedAt = require("./data/pricing_snapshot.json").generated_at;
+            const days = Math.floor((Date.now() - new Date(generatedAt).getTime()) / 86400000);
+            if (!(days <= 14)) {
+              console.log(`::error::data/pricing_snapshot.json is ${days} days old (generated_at=${generatedAt}). Run npm run pricing:snapshot in the version bump PR, after releasing traccia-py.`);
+              process.exit(1);
+            }
+            console.log(`Pricing snapshot is ${days} days old`);
+          '
+
       - name: Install Dependencies
         run: npm ci
 
