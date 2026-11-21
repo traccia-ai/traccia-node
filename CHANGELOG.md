@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-11-21
+
+### Added
+- `traccia-ts pricing:status` shows the LiteLLM commit the prices were built from, and cost spans record it as `llm.pricing.source_ref`
+
+### Changed
+- Requires Node.js 18.19 or newer (`engines` was `>=16.0.0`). Node 18, 20, 22 and 24 are tested
+- `traccia-ts pricing:refresh` downloads Traccia's reviewed pricing snapshot (the file the SDK ships, from traccia-py `main`) when the Traccia platform is unavailable, or always with `--source upstream`, instead of LiteLLM's raw price list. A download that fails the sanity check (too few models, key models unpriced, a price that is not a finite number of 0 or more) is not saved, and a platform response with no models or an invalid price falls back to that snapshot. Models LiteLLM no longer lists keep their last known price, as in the bundled snapshot
+- Bundled prices are the same as the Python SDK's: built from LiteLLM commit `6245f94` (5,320 models). They are refreshed and reviewed in each release instead of being downloaded while the release is built
+- Updated `axios` to 1.21 and `zod` to 4.6.7
+- The npm package no longer includes the test files
+
 ### Fixed
 - The `traccia.toml` that `traccia init` writes no longer says a root trace is auto-started on init: the Node SDK never does that, each top-level call is its own trace, and `runWithAutoTrace()` groups calls. `auto_start_trace` (read only by the Python SDK) now defaults to `false` there, matching the Python SDK
 - The ES module builds load: `import { init } from "@traccia/sdk/auto"` (and `"@traccia/sdk"`) in an app with `"type": "module"` threw `Dynamic require of "@opentelemetry/resources" is not supported` on import, so only `require()` worked. The ES module bundles now get a real `require` (from `createRequire(import.meta.url)`), so the dependencies and optional provider SDKs the source loads with `require()` resolve as in the CommonJS build
