@@ -20,7 +20,7 @@ An open-source TypeScript and JavaScript SDK for tracing, evaluations, prompt ma
 
 </div>
 
-- **Observe.** `init()` traces every OpenAI, Anthropic and Gemini call, with tokens and cost on each span. Send traces to Traccia or to any OTLP backend.
+- **Observe.** `init()` traces every OpenAI, Anthropic, Gemini and Groq call, with tokens and cost on each span. Send traces to Traccia or to any OTLP backend.
 - **Evaluate.** Score your agent on a dataset with `evaluate()`, locally or as a saved experiment, and fail a pull request when quality falls or cost or latency goes over your limit. Version prompts and load them at runtime.
 - **Govern.** Check each LLM and tool call before it runs: stop an agent that overspends, loops or calls the wrong tool.
 - **Prove.** Keep evidence for the EU AI Act and HIPAA in the Compliance Hub.
@@ -211,7 +211,7 @@ Use one or the other for a given call, not both. Guides for the [Vercel AI SDK](
 
 ## Works with
 
-- **Model SDKs, patched automatically:** OpenAI (Chat Completions and Responses), Anthropic, Gemini (`@google/genai` Interactions API)
+- **Model SDKs, patched automatically:** OpenAI (Chat Completions and Responses), Anthropic, Gemini (`@google/genai` Interactions API), Groq (`groq-sdk`, including streaming)
 - **Agent frameworks:** [LangChain](https://traccia.ai/docs/integrations/langchain/) and LangGraph, [OpenAI Agents SDK](https://traccia.ai/docs/integrations/openai-agents/)
 - **HTTP:** Express and Fastify middleware, `fetch` and axios, with W3C trace context across services
 - **Coding agents, traced without the SDK:** [Claude Code](https://traccia.ai/docs/integrations/claude-code/), [Cursor](https://traccia.ai/docs/integrations/cursor/), [GitHub Copilot](https://traccia.ai/docs/integrations/github-copilot/)

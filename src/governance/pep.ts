@@ -396,6 +396,7 @@ export async function checkPolicy(input: {
     throw rejectedError(rejected);
   }
   failMode.noteAnswer(ident, decision, startedAt);
+  checkCredentials.set(decision, { apiKey, endpoint, agentId });
   cacheBudget(agentId, decision.remaining_budget_usd);
   stampSpan(decision);
   if (decision.would_have) {
@@ -418,16 +419,47 @@ export async function checkPolicy(input: {
   return decision;
 }
 
+/**
+ * How a governed call ended, for settling its reservation. When `actualUsd` is missing, the
+ * server prices the call from `model`, `vendor` and the token counts; with none of them it
+ * releases the reservation.
+ */
+export interface SettleOptions {
+  release?: boolean;
+  actualUsd?: number;
+  model?: string;
+  vendor?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/**
+ * The credentials and agent each policy decision was checked with (see checkPolicy), so
+ * settlePolicy can settle it there.
+ */
+const checkCredentials = new WeakMap<object, { apiKey: string; endpoint: string; agentId: string }>();
+
+/**
+ * The USD amount the policy check reserved for a call, if any.
+ */
+export function reservedUsd(decision: Record<string, unknown> | undefined): number | undefined {
+  const reserved = (decision?.obligations as Record<string, unknown> | undefined)?.reserved_usd;
+  return typeof reserved === 'number' ? reserved : undefined;
+}
+
 export async function settlePolicy(
   decision: Record<string, unknown> | undefined,
-  opts: { release?: boolean; actualUsd?: number } = {},
+  opts: SettleOptions = {},
 ): Promise<void> {
   const reserved = (decision?.obligations as Record<string, unknown> | undefined)?.reserved_usd;
   if (reserved == null) {
     return;
   }
-  const { apiKey, endpoint } = resolveClientCredentials();
-  const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID;
+  // The reservation belongs to the account and agent its check used, so settle there. This
+  // also keeps a settle that starts after stopTracing() cleared the init() credentials working.
+  const bound = decision ? checkCredentials.get(decision) : undefined;
+  const { apiKey, endpoint } = bound ?? resolveClientCredentials();
+  const agentId = bound?.agentId || getAgentId() || process.env.TRACCIA_AGENT_ID;
   if (!apiKey || !endpoint || !agentId) {
     return;
   }
@@ -442,6 +474,10 @@ export async function settlePolicy(
         reserved_usd: reserved,
         actual_usd: opts.actualUsd,
         release: Boolean(opts.release),
+        model: opts.model,
+        vendor: opts.vendor,
+        input_tokens: opts.inputTokens,
+        output_tokens: opts.outputTokens,
       },
       { headers: { Authorization: `Bearer ${apiKey}` } },
     );
@@ -450,20 +486,80 @@ export async function settlePolicy(
   }
 }
 
-function estimateTokens(kwargs: Record<string, unknown>): number | undefined {
-  const messages = kwargs.messages as Array<{ content?: unknown }> | undefined;
-  let blob = '';
-  if (Array.isArray(messages)) {
-    blob = messages.map((item) => String(item?.content || '')).join('\n');
-  } else if (typeof kwargs.prompt === 'string') {
-    blob = kwargs.prompt;
-  } else if (typeof kwargs.input === 'string') {
-    blob = kwargs.input;
+/**
+ * Characters one image is counted as in a prompt estimate: 1,000 tokens, in the range vision
+ * models charge for a typical image.
+ */
+export const IMAGE_PROMPT_CHARS = 4000;
+
+const IMAGE_PART_TYPES = new Set(['image_url', 'image', 'input_image']);
+
+/**
+ * Characters of prompt in one message's content: a string, or an array of content parts
+ * (text parts by their text, image parts at IMAGE_PROMPT_CHARS each).
+ */
+function contentChars(content: unknown): number {
+  if (typeof content === 'string') {
+    return content.length;
   }
-  if (!blob) {
+  if (!Array.isArray(content)) {
+    return 0;
+  }
+  let chars = 0;
+  for (const part of content) {
+    if (typeof part === 'string') {
+      chars += part.length;
+      continue;
+    }
+    const p = (part ?? {}) as Record<string, unknown>;
+    if (typeof p.text === 'string') {
+      chars += p.text.length;
+    } else if (typeof p.type === 'string' && IMAGE_PART_TYPES.has(p.type)) {
+      chars += IMAGE_PROMPT_CHARS;
+    }
+  }
+  return chars;
+}
+
+/**
+ * Characters of tool call arguments in an assistant message, which are part of the prompt
+ * when the conversation is sent back.
+ */
+function toolCallChars(message: Record<string, unknown>): number {
+  const calls = message.tool_calls;
+  if (!Array.isArray(calls)) {
+    return 0;
+  }
+  let chars = 0;
+  for (const call of calls) {
+    const args = ((call ?? {}) as { function?: { arguments?: unknown } }).function?.arguments;
+    chars += typeof args === 'string' ? args.length : 0;
+  }
+  return chars;
+}
+
+/**
+ * Rough prompt size in tokens (characters / 4), as sent with the policy check.
+ */
+export function estimateTokens(kwargs: Record<string, unknown>): number | undefined {
+  const messages = kwargs.messages;
+  let chars = 0;
+  if (Array.isArray(messages)) {
+    for (const item of messages) {
+      const message = (item ?? {}) as Record<string, unknown>;
+      chars += contentChars(message.content) + toolCallChars(message);
+    }
+    // One separator per message boundary, as when the messages were joined with newlines.
+    chars += Math.max(messages.length - 1, 0);
+  } else if (typeof kwargs.prompt === 'string') {
+    chars = kwargs.prompt.length;
+  } else if (typeof kwargs.input === 'string') {
+    chars = kwargs.input.length;
+  }
+  if (!chars) {
     return undefined;
   }
-  return Math.max(Math.floor(blob.length / 4), 1);
+  return Math.max(Math.floor(chars / 4), 1);
 }
 
 /** Where this provider API takes the output-token cap: [params, key]. */
@@ -509,6 +605,7 @@ export async function enforceLlmCall(
     retrieval: retrievalContext(traceId),
   };
   if (vendor) {
+    // Picks that provider's price when the model name alone is ambiguous.
     context.vendor = vendor;
   }
   const prompt = promptContext();
@@ -538,9 +635,110 @@ export async function enforceLlmCall(
 
 export async function finishLlmCall(
   decision: Record<string, unknown> | undefined,
-  opts: { release?: boolean; actualUsd?: number } = {},
+  opts: SettleOptions = {},
 ): Promise<void> {
   await settlePolicy(decision, opts);
+}
+
+const pendingSettles = new Set<Promise<unknown>>();
+
+/**
+ * Keep track of a settle running in the background, so flushPendingSettles() can wait for
+ * it before tracing stops. The promise must not reject.
+ */
+export function trackPendingSettle(settle: Promise<unknown>): void {
+  pendingSettles.add(settle);
+  void settle.finally(() => pendingSettles.delete(settle));
+}
+
+/**
+ * Wait for every background settle started so far. stopTracing() calls this.
+ */
+export async function flushPendingSettles(): Promise<void> {
+  await Promise.all(Array.from(pendingSettles));
+}
+
+/** An LLM call still in flight: an open stream, or a request that has not returned. */
+export interface OpenCall {
+  /**
+   * Settle the call at its reported usage, or its reservation when that is unknown, and end
+   * its span. With `stop` (the default) a call with a reservation is also stopped where
+   * possible, to bound what it is billed; otherwise it goes on and its later end records
+   * nothing more. Resolves once the settle has started
+   * (after the policy check, if that is still pending).
+   */
+  settleAtShutdown(stop?: boolean): Promise<void>;
+  /** Resolves once the call has ended, however it ended, and its settle has started. */
+  finished(): Promise<void>;
+}
+
+const openCalls = new Set<OpenCall>();
+
+/** Register a call in flight; settleOpenCalls() settles it if it is still open then. */
+export function trackOpenCall(call: OpenCall): void {
+  openCalls.add(call);
+}
+
+export function untrackOpenCall(call: OpenCall): void {
+  openCalls.delete(call);
+}
+
+/** Default time limit for settleOpenCalls(), as traccia-py's stop_tracing() uses. */
+export const SHUTDOWN_SETTLE_TIMEOUT_MS = 10_000;
+
+/** How long drainOpenCalls() waits past its limit for policy checks still pending. */
+const DRAIN_GRACE_MS = 1_000;
+
+/** Run `work` for at most `timeoutMs`. True if it finished in time. */
+async function withinTimeLimit(timeoutMs: number, work: () => Promise<void>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeUp = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    // Never keep the process alive just for this limit.
+    (timer as { unref?: () => void }).unref?.();
+  });
+  try {
+    return await Promise.race([work().then(() => true), timeUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Settle the calls still in flight, then wait for every pending settle, all within
+ * `timeoutMs`. Each call with a reservation is stopped where possible; each is charged what it
+ * reported, or its reservation when that is unknown. stopTracing() calls this.
+ */
+export async function settleOpenCalls(timeoutMs = SHUTDOWN_SETTLE_TIMEOUT_MS): Promise<void> {
+  const calls = Array.from(openCalls);
+  await withinTimeLimit(timeoutMs, async () => {
+    await Promise.all(calls.map((call) => call.settleAtShutdown().catch(() => undefined)));
+    await flushPendingSettles();
+  });
+}
+
+/**
+ * Let the calls in flight finish on their own and wait for every pending settle, within
+ * `timeoutMs`; nothing is stopped. Calls still open when the time is up are settled then, at
+ * their reported usage or else their reservation, and go on: their later end records nothing
+ * more, and a stream among them is stopped once the app drops it. One whose policy check is
+ * still pending is waited for up to DRAIN_GRACE_MS more. The SIGTERM/SIGINT hook calls this,
+ * since the app keeps running (and may be draining its own work) after the signal.
+ */
+export async function drainOpenCalls(timeoutMs = SHUTDOWN_SETTLE_TIMEOUT_MS): Promise<void> {
+  const calls = Array.from(openCalls);
+  const drained = await withinTimeLimit(timeoutMs, async () => {
+    await Promise.all(calls.map((call) => call.finished().catch(() => undefined)));
+    await flushPendingSettles();
+  });
+  if (!drained) {
+    // A call that finished meanwhile is not settled again. One whose policy check is still
+    // pending ends once that decides: wait a little for it, so its span ends before the hook
+    // shuts the tracer down.
+    await withinTimeLimit(Math.min(DRAIN_GRACE_MS, timeoutMs), async () => {
+      await Promise.all(calls.map((call) => call.settleAtShutdown(false).catch(() => undefined)));
+    });
+  }
 }
 
 export async function enforceToolCall(
