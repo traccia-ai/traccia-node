@@ -47,7 +47,8 @@ export interface ISpan {
 
   setAttribute(key: string, value: unknown): void;
   addEvent(name: string, attributes?: Record<string, unknown>): void;
-  end(): void;
+  /** End the span, at `endTimeNs` (epoch nanoseconds) when given, else now. */
+  end(endTimeNs?: number): void;
   recordException(error: Error, attributes?: Record<string, unknown>): void;
   isRecording(): boolean;
 }
@@ -62,6 +63,8 @@ export interface ITracer {
       attributes?: Record<string, unknown>;
       parent?: ISpan | null;
       parentContext?: ISpanContext | null;
+      /** Start time in epoch nanoseconds; now if omitted. */
+      startTimeNs?: number;
     }
   ): ISpan;
 

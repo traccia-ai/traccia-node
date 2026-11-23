@@ -3,10 +3,25 @@
  */
 
 import { Span as OTelSpan, SpanStatusCode } from '@opentelemetry/api';
-import type { AttributeValue, Attributes } from '@opentelemetry/api';
+import type { AttributeValue, Attributes, HrTime } from '@opentelemetry/api';
 import { ISpan, SpanStatus, SpanEvent, ISpanContext } from '../types';
 import type { TracerProvider } from './provider';
 import { forgetTrace } from '../governance/evidence';
+
+/** True for a usable epoch-nanosecond timestamp. */
+export function isValidTimeNs(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/** Epoch nanoseconds -> OTel [seconds, nanos]. */
+export function nsToHrTime(ns: number): HrTime {
+  const seconds = Math.floor(ns / 1e9);
+  return [seconds, Math.round(ns - seconds * 1e9)];
+}
+
+function nowNs(): number {
+  return Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
+}
 
 /**
  * Span implementation representing a unit of work.
@@ -25,13 +40,20 @@ export class Span implements ISpan {
   private provider: TracerProvider;
   private ended = false;
 
-  constructor(name: string, otelSpan: OTelSpan, provider?: TracerProvider, parentSpanId?: string, attributes?: Record<string, unknown>) {
+  constructor(
+    name: string,
+    otelSpan: OTelSpan,
+    provider?: TracerProvider,
+    parentSpanId?: string,
+    attributes?: Record<string, unknown>,
+    startTimeNs?: number,
+  ) {
     this.name = name;
     this.otelSpan = otelSpan;
     this.provider = provider;
     this.parentSpanId = parentSpanId;
     this.attributes = attributes ? { ...attributes } : {};
-    this.startTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
+    this.startTimeNs = isValidTimeNs(startTimeNs) ? startTimeNs : nowNs();
   }
 
   get context(): ISpanContext {
@@ -99,10 +121,14 @@ export class Span implements ISpan {
    * Enrichment processors run before the span is marked ended so they can still
    * call setAttribute (Python parity). Export processors in the same list see
    * the enriched attributes. After this returns, the span is immutable.
+   *
+   * @param endTimeNs End time in epoch nanoseconds, for work that finished earlier
+   *   (e.g. a framework callback delivered late); now if omitted. Never before the start.
    */
-  end(): void {
+  end(endTimeNs?: number): void {
     if (this.ended) return;
-    this.endTimeNs = Math.floor((performance.timeOrigin + performance.now()) * 1_000_000);
+    const explicitEnd = isValidTimeNs(endTimeNs);
+    this.endTimeNs = Math.max(explicitEnd ? endTimeNs : nowNs(), this.startTimeNs);
 
     if (this.provider) {
       this.provider.notifySpanEnd(this);
@@ -110,7 +136,7 @@ export class Span implements ISpan {
 
     this.ended = true;
     this.flushToOtel();
-    this.otelSpan.end();
+    this.otelSpan.end(explicitEnd ? nsToHrTime(this.endTimeNs) : undefined);
 
     // The run is over once its local root span ends; drop its policy evidence.
     if (!this.parentSpanId) {
