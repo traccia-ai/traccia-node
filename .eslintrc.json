@@ -33,5 +33,20 @@
       }
     ]
   },
+  "overrides": [
+    {
+      "files": ["src/instrumentation/**/*.ts", "src/integrations/**/*.ts"],
+      // These modules patch untyped third-party SDK objects (OpenAI, Anthropic, Gemini, axios,
+      // LangChain, LangGraph, CrewAI, Ollama, OpenAI Agents) at runtime, so their values are
+      // dynamic by design. Keep the no-unsafe-* findings visible as warnings, not lint failures.
+      "rules": {
+        "@typescript-eslint/no-unsafe-member-access": "warn",
+        "@typescript-eslint/no-unsafe-assignment": "warn",
+        "@typescript-eslint/no-unsafe-call": "warn",
+        "@typescript-eslint/no-unsafe-argument": "warn",
+        "@typescript-eslint/no-unsafe-return": "warn"
+      }
+    }
+  ],
   "ignorePatterns": ["**/*.test.ts"]
 }

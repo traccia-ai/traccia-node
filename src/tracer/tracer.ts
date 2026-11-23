@@ -71,7 +71,7 @@ export class Tracer implements ITracer {
     const requestedStartNs = options?.startTimeNs;
     const startTimeNs = isValidTimeNs(requestedStartNs) ? requestedStartNs : undefined;
     const otelOptions: OTelSpanOptions = {
-      attributes: options?.attributes as any,
+      attributes: options?.attributes as OTelSpanOptions['attributes'],
     };
     if (startTimeNs !== undefined) {
       otelOptions.startTime = nsToHrTime(startTimeNs);

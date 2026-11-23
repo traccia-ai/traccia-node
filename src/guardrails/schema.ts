@@ -5,6 +5,8 @@
  * evaluations, and per-run summaries.
  */
 
+import { createHash } from "crypto";
+
 export enum GuardrailCategory {
   INPUT_VALIDATION = "input_validation",
   PROMPT_INJECTION = "prompt_injection",
@@ -116,8 +118,7 @@ export function computeGuardrailFindingId(finding: GuardrailFinding): string {
     finding.evidence_ref.span_id || "",
   ].join("|");
   
-  const crypto = require("crypto");
-  return crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
+  return createHash("sha256").update(key).digest("hex").slice(0, 16);
 }
 
 /**

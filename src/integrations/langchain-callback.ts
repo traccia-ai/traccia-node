@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/require-await --
+ * LangChain's callback API is promise-based, so the handlers stay async even though
+ * their bodies are synchronous. */
 import type { AgentAction, AgentFinish } from "@langchain/core/agents";
 import { BaseCallbackHandler } from "@langchain/core/callbacks/base";
 import type { Document } from "@langchain/core/documents";
@@ -168,7 +171,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleAgentEnd?(
     action: AgentFinish,
     runId: string,
-    parentRunId?: string,
+    _parentRunId?: string,
   ): Promise<void> {
     try {
       console.debug(`Agent finish with ID: ${runId}`);
@@ -185,7 +188,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleChainError(
     err: any,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Chain error: ${err} with ID: ${runId}`);
@@ -295,7 +298,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
         message.map((m) => this.extractChatMessageContent(m)),
       );
 
-      this.handleGenerationStart(
+      await this.handleGenerationStart(
         llm,
         prompts,
         runId,
@@ -313,7 +316,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleChainEnd(
     outputs: ChainValues,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Chain end with ID: ${runId}`);
@@ -363,7 +366,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
     try {
       console.debug(`LLM start with ID: ${runId}`);
 
-      this.handleGenerationStart(
+      await this.handleGenerationStart(
         llm,
         prompts,
         runId,
@@ -435,7 +438,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleRetrieverEnd(
     documents: Document<Record<string, any>>[],
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Retriever end with ID: ${runId}`);
@@ -454,7 +457,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleRetrieverError(
     err: any,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Retriever error: ${err} with ID: ${runId}`);
@@ -472,7 +475,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleToolEnd(
     output: string,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Tool end with ID: ${runId}`);
@@ -489,7 +492,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleToolError(
     err: any,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`Tool error ${err} with ID: ${runId}`);
@@ -509,7 +512,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleLLMEnd(
     output: LLMResult,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`LLM end with ID: ${runId}`);
@@ -592,7 +595,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
   async handleLLMError(
     err: any,
     runId: string,
-    parentRunId?: string | undefined,
+    _parentRunId?: string | undefined,
   ): Promise<void> {
     try {
       console.debug(`LLM error ${err} with ID: ${runId}`);
@@ -719,7 +722,9 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
       try {
         azureRefusalError =
           "\n\nError details:\n" + JSON.stringify(err["error"], null, 2);
-      } catch { }
+      } catch {
+        /* ignore: error details are not serializable */
+      }
     }
 
     return azureRefusalError;
@@ -814,13 +819,13 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
         Array.isArray(message.tool_calls) &&
         (message.tool_calls?.length ?? 0) > 0
       ) {
-        (response as any)[`tool_calls`] = message[`tool_calls`];
+        (response)[`tool_calls`] = message[`tool_calls`];
       }
       if (
         "additional_kwargs" in message &&
         "tool_calls" in message["additional_kwargs"]
       ) {
-        (response as any)[`tool_calls`] =
+        (response)[`tool_calls`] =
           message["additional_kwargs"]["tool_calls"];
       }
     } else if (message.getType() === "system") {
@@ -849,7 +854,7 @@ export class TracciaCallbackHandler extends BaseCallbackHandler {
     if (
       (message.additional_kwargs.function_call ||
         message.additional_kwargs.tool_calls) &&
-      (response as any)[`tool_calls`] === undefined
+      (response)[`tool_calls`] === undefined
     ) {
       return { ...response, additional_kwargs: message.additional_kwargs };
     }

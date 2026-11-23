@@ -14,7 +14,7 @@ export function experimentName(options: {
   const env = options.env || process.env;
   const stem = path.basename(options.script, path.extname(options.script));
   const subject = GENERIC_EVAL_SCRIPTS.has(stem.toLowerCase()) ? String(options.dataset).trim() : stem;
-  let label = `${subject} eval`;
+  const label = `${subject} eval`;
   const ref = String(env.TRACCIA_GIT_HEAD_REF || '').trim();
   const pr = String(env.TRACCIA_PR_NUMBER || '').trim();
   if (ref) return `${label} · ${ref}`;

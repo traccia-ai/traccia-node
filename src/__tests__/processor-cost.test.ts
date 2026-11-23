@@ -2,6 +2,7 @@
  * Cost processor alignment tests (mirrors traccia-py tests/test_pricing.py).
  */
 
+import { PricingTable } from '../config/pricing-config';
 import { CostAnnotatingProcessor } from '../processor/cost-processor';
 import { ISpan } from '../types';
 
@@ -64,6 +65,22 @@ describe('CostAnnotatingProcessor alignment', () => {
     expect(span.attributes['llm.pricing.source']).toBe('local_cache');
     expect(span.attributes['llm.pricing.snapshot_version']).toBe('2026-01-01T00:00:00Z');
     expect(span.attributes['llm.pricing.model_key']).toBe('gpt-4o');
+  });
+
+  it('records the LiteLLM commit when known, and clears it when the new table has none', () => {
+    const proc = new CostAnnotatingProcessor({
+      pricingTable: { 'gpt-4o': { inputCost: 0.005, outputCost: 0.015 } },
+      pricingSourceRef: 'a'.repeat(40),
+    });
+    const usage = { 'llm.model': 'gpt-4o', 'llm.usage.prompt_tokens': 10, 'llm.usage.completion_tokens': 5 };
+    const span = new FakeSpan({ ...usage });
+    proc.onEnd(span);
+    expect(span.attributes['llm.pricing.source_ref']).toBe('a'.repeat(40));
+
+    proc.updatePricingTable({ 'gpt-4o': { inputCost: 0.005, outputCost: 0.015 } }, undefined, undefined, null);
+    const later = new FakeSpan({ ...usage });
+    proc.onEnd(later);
+    expect(later.attributes['llm.pricing.source_ref']).toBeUndefined();
   });
 
   it('preserves llm.usage.source and sets llm.cost.source alias', () => {
@@ -134,6 +151,56 @@ describe('CostAnnotatingProcessor alignment', () => {
       'llm.usage.completion_tokens': 50,
     });
     proc.onEnd(span);
+    expect(span.attributes['llm.cost.usd']).toBeUndefined();
+  });
+});
+
+describe('CostAnnotatingProcessor vendor pricing', () => {
+  const makeProcessor = () =>
+    new CostAnnotatingProcessor({
+      pricingTable: {
+        'ovhcloud/Qwen3-32B': { prompt: 0.00008, completion: 0.00023, _provider: 'ovhcloud' },
+        'groq/qwen/qwen3-32b': { prompt: 0.00029, completion: 0.00059, _provider: 'groq' },
+        'groq/openai/gpt-oss-120b': { prompt: 0.00015, completion: 0.0006, cached_prompt: 0.000075, _provider: 'groq' },
+        'fireworks_ai/accounts/fireworks/models/gemma2-9b-it': { prompt: 0.0002, completion: 0.0002, _provider: 'fireworks_ai' },
+        // Platform snapshot entries: per-1K prompt/completion rates and a provider.
+      } as unknown as PricingTable,
+      pricingSource: 'local_cache',
+      pricingGeneratedAt: '2026-01-01T00:00:00Z',
+    });
+
+  it("prices a Groq span at Groq's price, as its settlement is", () => {
+    const span = new FakeSpan({
+      'llm.vendor': 'groq',
+      'llm.model': 'qwen/qwen3-32b',
+      'llm.usage.prompt_tokens': 1000,
+      'llm.usage.completion_tokens': 1000,
+    });
+    makeProcessor().onEnd(span);
+    expect(span.attributes['llm.cost.usd']).toBeCloseTo(0.00088);
+    expect(span.attributes['llm.pricing.model_key']).toBe('groq/qwen/qwen3-32b');
+  });
+
+  it("prices a Groq span's cached tokens at the cached rate", () => {
+    const span = new FakeSpan({
+      'llm.vendor': 'groq',
+      'llm.model': 'openai/gpt-oss-120b',
+      'llm.usage.prompt_tokens': 200,
+      'llm.usage.cache_read_tokens': 800,
+      'llm.usage.completion_tokens': 0,
+    });
+    makeProcessor().onEnd(span);
+    expect(span.attributes['llm.cost.usd']).toBeCloseTo(0.00003 + 0.00006);
+  });
+
+  it("leaves a Groq span unpriced rather than use another provider's price", () => {
+    const span = new FakeSpan({
+      'llm.vendor': 'groq',
+      'llm.model': 'gemma2-9b-it',
+      'llm.usage.prompt_tokens': 100,
+      'llm.usage.completion_tokens': 50,
+    });
+    makeProcessor().onEnd(span);
     expect(span.attributes['llm.cost.usd']).toBeUndefined();
   });
 });

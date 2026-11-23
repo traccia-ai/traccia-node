@@ -2,7 +2,8 @@
  * Span implementation wrapping OpenTelemetry.
  */
 
-import { Span as OTelSpan, SpanStatusCode, HrTime } from '@opentelemetry/api';
+import { Span as OTelSpan, SpanStatusCode } from '@opentelemetry/api';
+import type { AttributeValue, Attributes, HrTime } from '@opentelemetry/api';
 import { ISpan, SpanStatus, SpanEvent, ISpanContext } from '../types';
 import type { TracerProvider } from './provider';
 import { forgetTrace } from '../governance/evidence';
@@ -49,7 +50,7 @@ export class Span implements ISpan {
   ) {
     this.name = name;
     this.otelSpan = otelSpan;
-    this.provider = provider as TracerProvider;
+    this.provider = provider;
     this.parentSpanId = parentSpanId;
     this.attributes = attributes ? { ...attributes } : {};
     this.startTimeNs = isValidTimeNs(startTimeNs) ? startTimeNs : nowNs();
@@ -81,7 +82,7 @@ export class Span implements ISpan {
   setAttribute(key: string, value: unknown): void {
     if (this.ended) return;
     this.attributes[key] = value;
-    this.otelSpan.setAttribute(key, value as any);
+    this.otelSpan.setAttribute(key, value as AttributeValue);
   }
 
   /**
@@ -152,7 +153,7 @@ export class Span implements ISpan {
       // SpanEvent.timestamp is epoch ns; OTel accepts [seconds, nanos]
       const ns = event.timestamp;
       const time: [number, number] = [Math.floor(ns / 1e9), Math.floor(ns % 1e9)];
-      this.otelSpan.addEvent(event.name, attrs as any, time);
+      this.otelSpan.addEvent(event.name, attrs as Attributes, time);
     }
     if (this.status === SpanStatus.ERROR) {
       this.otelSpan.setStatus({ code: SpanStatusCode.ERROR, message: this.statusDescription });

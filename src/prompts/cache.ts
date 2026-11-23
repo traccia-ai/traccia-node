@@ -68,7 +68,7 @@ export class PromptCache {
         const { payload, etag } = await fetch();
         this.set(key, payload, etag);
       } catch (err) {
-        console.warn(`[traccia.prompts] prompt_stale_served: background refresh failed for ${key}:`, err);
+        console.warn(`[traccia.prompts] prompt_stale_served: background refresh failed for ${key.join(',')}:`, err);
       } finally {
         this.endRefresh(key);
       }

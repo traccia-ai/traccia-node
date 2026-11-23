@@ -36,6 +36,7 @@ import { InstrumentationError } from '../errors';
  * const response = await model.invoke({ input: 'Write a poem' });
  * // Automatically traced!
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise; the optional peer is loaded synchronously with require()
 export async function createOllamaWithTracing(config: {
   model: string;
   baseUrl?: string;

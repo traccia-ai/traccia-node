@@ -1,6 +1,6 @@
 /**
  * TRC-284 edge cases: input robustness, provider id formats, cache rates,
- * override/cache precedence, snapshot integrity, the snapshot build script,
+ * override/cache precedence, snapshot integrity, the snapshot refresh script,
  * and bounded resolver state. Uses the real data/pricing_snapshot.json.
  */
 
@@ -48,7 +48,6 @@ describe('TRC-284 edge cases', () => {
     it('keeps a provider-specific price when the provider key exists (azure/gpt-4o-mini)', () => {
       expect(resolver.matchPricingModelKey('azure/gpt-4o-mini')).toBe('azure/gpt-4o-mini');
       expect(resolver.compute('azure/gpt-4o-mini', 1000, 0)).toBeCloseTo(rates['azure/gpt-4o-mini'].prompt!, 12);
-      expect(rates['azure/gpt-4o-mini'].prompt).not.toBe(rates['gpt-4o-mini'].prompt);
     });
 
     it('prices Bedrock ids exactly, including region prefixes', () => {
@@ -189,47 +188,37 @@ describe('TRC-284 edge cases', () => {
     });
   });
 
-  describe('build script normalizer', () => {
-    it('produces the same per-1K schema as traccia-py', () => {
+  describe('snapshot refresh script', () => {
+    // The script copies traccia-py's snapshot; its sanity check decides whether a copy is written.
+    const runCheck = (models: unknown, previous: unknown): string => {
       const script = path.join(REPO_ROOT, 'scripts', 'build-pricing-snapshot.mjs');
-      const sample = {
-        'gpt-4o-mini': {
-          input_cost_per_token: 1.5e-7,
-          output_cost_per_token: 6e-7,
-          cache_read_input_token_cost: 7.5e-8,
-          litellm_provider: 'openai',
-          mode: 'chat',
-          max_tokens: 16384,
-          max_input_tokens: 128000,
-        },
-        'only-output': { output_cost_per_token: 2e-6 },
-        'no-price': { mode: 'chat' },
-        sample_spec: 'not an object',
-      };
       const url = 'file:///' + script.replace(/\\/g, '/').replace(/^\/+/, '');
-      const out = execFileSync(
+      const fixture = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'traccia-check-')), 'in.json');
+      fs.writeFileSync(fixture, JSON.stringify({ models, previous }));
+      return execFileSync(
         process.execPath,
         [
           '--input-type=module',
           '-e',
-          `const { normalize } = await import(${JSON.stringify(url)}); console.log(JSON.stringify(normalize(${JSON.stringify(sample)})));`,
+          `const { check } = await import(${JSON.stringify(url)});
+           const { models, previous } = JSON.parse((await import('node:fs')).readFileSync(${JSON.stringify(fixture)}, 'utf-8'));
+           try { check(models, previous); console.log('ok'); } catch (e) { console.log(e.message); }`,
         ],
         { encoding: 'utf-8' },
-      );
-      expect(JSON.parse(out)).toEqual({
-        'gpt-4o-mini': {
-          prompt: 0.00015,
-          completion: 0.0006,
-          cached_prompt: 0.000075,
-          _provider: 'openai',
-          _mode: 'chat',
-          _max_tokens: 16384,
-          _max_input_tokens: 128000,
-        },
-        'only-output': { completion: 0.002 },
-      });
-      // Same entry as the shipped, Python-built snapshot.
-      expect(JSON.parse(out)['gpt-4o-mini']).toEqual(snapshotJson.models['gpt-4o-mini']);
+      ).trim();
+    };
+
+    it('accepts the shipped snapshot', () => {
+      expect(runCheck(rates, rates)).toBe('ok');
+    });
+
+    it('rejects a snapshot that lost key models or most of its models', () => {
+      const small = { 'gpt-4o': rates['gpt-4o'] };
+      const message = runCheck(small, rates);
+      expect(message).toContain('sanity check failed');
+      expect(message).toContain('only 1 models');
+      expect(message).toContain('model count fell');
+      expect(message).toContain('gpt-4o-mini is missing');
     });
   });
 

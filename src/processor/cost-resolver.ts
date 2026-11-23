@@ -154,7 +154,7 @@ export class CostResolver {
     }
     const base = baseName(model);
     const keys = this.overrideEntries
-      .filter(([key, rates]) => baseName(key) === base && overrideFitsVendor(key, rates, model, vendor!))
+      .filter(([key, rates]) => baseName(key) === base && overrideFitsVendor(key, rates, model, vendor))
       .map(([key]) => key);
     if (!keys.length) {
       return undefined;
@@ -207,13 +207,13 @@ export class CostResolver {
       return name;
     }
     this.buildIndexes();
-    return this.lowerIndex!.get(name.toLowerCase());
+    return this.lowerIndex.get(name.toLowerCase());
   }
 
   /** Provider-prefixed keys: grok-4.7 -> xai/grok-4.7. Shortest key wins. */
   private matchProviderPrefixed(name: string): string | undefined {
     this.buildIndexes();
-    return this.tailIndex!.get(name.toLowerCase());
+    return this.tailIndex.get(name.toLowerCase());
   }
 
   private buildIndexes(): void {
@@ -246,7 +246,7 @@ export class CostResolver {
 const GLOBAL_RESOLVER_KEY = Symbol.for('__TRACCIA_COST_RESOLVER__');
 
 export function getResolver(): CostResolver {
-  const globalAny = globalThis as any;
+  const globalAny = globalThis as unknown as Record<symbol, CostResolver | undefined>;
   if (!globalAny[GLOBAL_RESOLVER_KEY]) {
     // Before init() runs: the shipped snapshot, or an empty table (unpriced) if it is missing.
     const bundled = readBundledSnapshot();
@@ -258,7 +258,7 @@ export function getResolver(): CostResolver {
 }
 
 export function setResolver(resolver: CostResolver): void {
-  const globalAny = globalThis as any;
+  const globalAny = globalThis as unknown as Record<symbol, CostResolver | undefined>;
   globalAny[GLOBAL_RESOLVER_KEY] = resolver;
 }
 
@@ -363,7 +363,7 @@ export function modelCandidates(model: string): string[] {
 }
 
 function hasOwn(obj: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(obj, key);
+  return Object.prototype.hasOwnProperty.call(obj, key) as boolean;
 }
 
 function modelTail(key: string): string {
@@ -372,7 +372,9 @@ function modelTail(key: string): string {
   if (dot > 0) {
     const head = tail.slice(0, dot);
     const rest = tail.slice(dot + 1);
-    if (/^[a-z][a-z0-9-]*$/i.test(head) && rest.includes("-")) return rest;
+    // A dotted provider prefix (bedrock's "anthropic.claude-...") is letters and hyphens
+    // only, as in traccia-py; in "llama-3.3-70b" the dot is part of the version.
+    if (/^[a-z]+(-[a-z]+)*$/i.test(head) && rest.includes("-")) return rest;
   }
   return tail;
 }

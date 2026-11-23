@@ -5,6 +5,148 @@ import * as path from 'path';
 
 export const SCHEMA_VERSION = 1;
 
+// Shapes of the JSON this gate reads. They come from evaluate() rows, the eval runtime API
+// and the shared fixture, so every field is optional and checked before use.
+
+/** One score (or one question of a multi-question score) on a result row panel. */
+export type GateScore = {
+  name?: unknown;
+  scorer_name?: unknown;
+  scorer_id?: unknown;
+  role?: unknown;
+  type?: unknown;
+  key?: unknown;
+  status?: unknown;
+  score?: unknown;
+  passed?: unknown;
+  questions?: unknown;
+  config?: { questions?: unknown } | null;
+  definition_hash?: string;
+  definition_identity?: string;
+  invocation?: { id?: unknown; cost_usd?: unknown } | null;
+};
+
+export type GatePanel = {
+  scores?: GateScore[];
+  task_cost?: { coverage?: unknown; usd?: number } | null;
+  cost_usd?: number;
+  latency_ms?: number;
+};
+
+export type GateRow = { item_id?: unknown; panels?: GatePanel[] };
+
+export type GateFailure = { code: string; message: string };
+
+/** Per-scorer summary row, for the candidate run and for a baseline panel. */
+export type ScorerSummary = {
+  name?: string;
+  scorer_id?: string;
+  expected?: number;
+  completed?: number;
+  missing?: number | boolean;
+  errored?: number | boolean;
+  duplicate?: boolean;
+  passes?: number;
+  pass_rate?: number | null;
+  informational?: boolean;
+  non_finite?: boolean;
+  verified?: boolean;
+  definition_hash?: string | null;
+  definition_conflict?: boolean;
+  definition_identity?: string;
+  baseline_pass_rate?: number | null;
+  baseline_definition_hash?: string;
+};
+
+export type ScorerEvidence = { scorer_id?: unknown; name?: unknown; panel_index?: unknown; verified?: boolean };
+
+export type GateThresholds = {
+  min_pass_rate?: number | null;
+  max_drop?: number | null;
+  max_latency_increase?: number | null;
+  max_task_cost_increase?: number | null;
+  max_judge_cost_increase?: number | null;
+};
+
+export type GateOptions = GateThresholds & {
+  scorers?: string[];
+  informational?: string[];
+  baseline_prompt?: string | null;
+  baseline_experiment?: string | null;
+  baseline_dataset_verified?: boolean;
+  baseline_scorer_unverified?: boolean;
+  baseline_missing?: boolean;
+  baseline_panel_required?: boolean;
+  unhashed_scorers?: string[];
+  scorer_ids?: Record<string, string>;
+};
+
+export type GateReport = GateThresholds & {
+  rows?: GateRow[];
+  scorers?: ScorerSummary[];
+  summary_failed?: boolean;
+  persist_error?: unknown;
+  dataset_drift?: boolean;
+  dataset_verified?: unknown;
+  dataset_fingerprint?: unknown;
+  dataset_changed?: boolean;
+  allow_dataset_change?: boolean;
+  task_errors?: number;
+  experiment_id?: unknown;
+  url?: unknown;
+  baseline_experiment_id?: unknown;
+  cost_gate?: boolean;
+  cost_coverage?: unknown;
+  task_cost_increase?: number | null;
+  judge_cost_increase?: number | null;
+  judge_workload_mismatch?: boolean;
+  latency_gate?: boolean;
+  latency_incomplete?: boolean;
+  latency_increase?: number | null;
+  latency_concurrency?: unknown;
+  latency_concurrency_mismatch?: boolean;
+  allow_concurrency_mismatch?: boolean;
+  implementation_mismatch?: boolean;
+  scorer_definition_changed?: boolean;
+};
+
+/** A baseline experiment panel, as loaded by the CLI. */
+export type GateBaseline = {
+  missing?: boolean;
+  panel_required?: boolean;
+  experiment_id?: string;
+  panel_index?: number | null;
+  prompt_version_id?: unknown;
+  dataset_fingerprint?: unknown;
+  dataset_verified?: boolean;
+  scorer_evidence?: ScorerEvidence[];
+  scorers?: ScorerSummary[];
+  latency_concurrency?: unknown;
+  mean_latency_ms?: number;
+  task_cost_usd?: number;
+  task_cost_coverage?: unknown;
+  judge_cost_usd?: number;
+  judge_cost_coverage?: unknown;
+  judge_definition_hashes?: string[];
+};
+
+export type GateOutcome = {
+  exit_code: number;
+  code: string | null;
+  failures: GateFailure[];
+  quality_gate: boolean;
+  label: string;
+  schema_version: number;
+  dataset_fingerprint: unknown;
+  dataset_verified: unknown;
+  experiment_id: unknown;
+  url: unknown;
+  scorers: ScorerSummary[];
+  gates?: Record<string, unknown>;
+};
+
+const RELATIVE_GATES = ['max_latency_increase', 'max_task_cost_increase', 'max_judge_cost_increase'] as const;
+
 function finite(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -40,7 +182,7 @@ function fail(code: number, name: string, message: string) {
   };
 }
 
-export function preflight(options: Record<string, any>) {
+export function preflight(options: GateOptions) {
   const scorers: string[] = options.scorers || [];
   const informational: string[] = options.informational || [];
   const minRate = options.min_pass_rate;
@@ -51,7 +193,7 @@ export function preflight(options: Record<string, any>) {
   if (maxDrop != null && (!finite(maxDrop) || maxDrop < 0 || maxDrop > 1)) {
     return fail(2, 'bad_flags', 'max drop must be between 0 and 1');
   }
-  for (const key of ['max_latency_increase', 'max_task_cost_increase', 'max_judge_cost_increase']) {
+  for (const key of RELATIVE_GATES) {
     const value = options[key];
     if (value != null && (!finite(value) || value < 0)) {
       return fail(2, 'bad_flags', `${key} must be a finite number >= 0`);
@@ -71,7 +213,7 @@ export function preflight(options: Record<string, any>) {
   }
   const relative =
     maxDrop != null ||
-    ['max_latency_increase', 'max_task_cost_increase', 'max_judge_cost_increase'].some((key) => options[key] != null);
+    RELATIVE_GATES.some((key) => options[key] != null);
   if (relative && !options.baseline_prompt && !options.baseline_experiment) {
     return fail(2, 'baseline_required', 'This gate needs a baseline');
   }
@@ -86,8 +228,8 @@ export function preflight(options: Record<string, any>) {
   return null;
 }
 
-export function decide(report: Record<string, any>) {
-  const failures: { code: string; message: string }[] = [];
+export function decide(report: GateReport): GateOutcome {
+  const failures: GateFailure[] = [];
   if (report.summary_failed) return result(5, 'summary_failed', failures, report, false);
   if (report.persist_error) {
     failures.push({ code: 'persist_failed', message: String(report.persist_error) });
@@ -137,7 +279,7 @@ export function decide(report: Record<string, any>) {
   if ((report.min_pass_rate != null || report.max_drop != null) && report.dataset_verified !== true) {
     failures.push({ code: 'dataset_unverified', message: 'The dataset snapshot was not verified' });
   }
-  const comparedNow = (report.scorers || []).filter((scorer: any) => !scorer.informational);
+  const comparedNow = (report.scorers || []).filter((scorer) => !scorer.informational);
   if (report.max_drop != null) {
     if (!comparedNow.length) {
       failures.push({ code: 'baseline_missing', message: 'No scorer has a baseline pass rate' });
@@ -167,7 +309,7 @@ export function decide(report: Record<string, any>) {
     return result(1, 'dataset_changed', failures, report, true);
   }
 
-  const compared = (report.scorers || []).filter((scorer: any) => !scorer.informational);
+  const compared = (report.scorers || []).filter((scorer) => !scorer.informational);
   if ((report.min_pass_rate != null || report.max_drop != null) && compared.length) {
     quality = true;
     for (const scorer of compared) {
@@ -198,12 +340,12 @@ export function decide(report: Record<string, any>) {
 function result(
   exitCode: number,
   code: string | null,
-  failures: { code: string; message: string }[],
-  report: Record<string, any>,
+  failures: GateFailure[],
+  report: GateReport,
   qualityGate: boolean,
-) {
+): GateOutcome {
   const passed = exitCode === 0;
-  const body: Record<string, any> = {
+  const body: GateOutcome = {
     exit_code: exitCode,
     code,
     failures,
@@ -217,33 +359,35 @@ function result(
     scorers: report.scorers || [],
   };
   const gates: Record<string, unknown> = {};
-  for (const key of ['min_pass_rate', 'max_drop', 'max_task_cost_increase', 'max_judge_cost_increase', 'max_latency_increase', 'baseline_experiment_id']) {
+  for (const key of ['min_pass_rate', 'max_drop', 'max_task_cost_increase', 'max_judge_cost_increase', 'max_latency_increase', 'baseline_experiment_id'] as const) {
     if (report[key] != null) gates[key] = report[key];
   }
   if (Object.keys(gates).length) body.gates = gates;
   return body;
 }
 
-function selectedNames(scorers: any[] = []): string[] {
+function selectedNames(scorers: unknown[] = []): string[] {
   return scorers.map((item) => String(item).replace(/^local:/, ''));
 }
 
-function questionDefinition(score: any): string[] {
-  const raw = Array.isArray(score?.config?.questions) ? score.config.questions : [];
+function questionDefinition(score: GateScore): string[] {
+  const questions = score?.config?.questions;
+  const raw: unknown[] = Array.isArray(questions) ? (questions as unknown[]) : [];
   const keys: string[] = [];
   for (const question of raw) {
-    if (question && typeof question === 'object' && question.key != null) keys.push(String(question.key));
+    const key = question && typeof question === 'object' ? (question as { key?: unknown }).key : undefined;
+    if (key != null) keys.push(String(key));
     else if (typeof question === 'string') keys.push(question);
   }
   return keys;
 }
 
 export function reportFromRows(
-  rows: any[],
+  rows: GateRow[],
   informational: string[] = [],
-  itemIds?: string[],
-  scorers?: any[],
-) {
+  itemIds?: unknown[],
+  scorers?: unknown[],
+): ScorerSummary[] {
   const info = new Set(informational);
   const ids = itemIds ? itemIds.map(String) : [];
   if (!itemIds) {
@@ -253,15 +397,17 @@ export function reportFromRows(
   }
   const uniqueIds = [...new Set(ids)];
   const duplicateItems = ids.length !== uniqueIds.length;
-  const observations = new Map<string, any[]>();
+  type Observation = { itemId: string; key: string | null; unit: GateScore; score: GateScore };
+  const observations = new Map<string, Observation[]>();
   const idToName = new Map<string, string>();
-  const byName = new Map<string, any[]>();
+  const byName = new Map<string, Observation[]>();
   for (const row of rows || []) {
     if (row?.item_id == null) continue;
     const itemId = String(row.item_id);
     for (const panel of row.panels || []) {
       for (const score of panel.scores || []) {
-        const questions = Array.isArray(score.questions) && score.questions.length ? score.questions : null;
+        const questions =
+          Array.isArray(score.questions) && score.questions.length ? (score.questions as GateScore[]) : null;
         if (score.role === 'summary' && !questions) continue;
         const name = String(score.scorer_name || score.name || '');
         const scorerId = String(score.scorer_id || '');
@@ -296,7 +442,7 @@ export function reportFromRows(
     }
   }
   const infoNames = new Set([...info].map((token) => idToName.get(token) || token));
-  const out: Record<string, any>[] = [];
+  const out: ScorerSummary[] = [];
   for (const name of order) {
     const seen = observations.get(name) || [];
     const configSets: string[][] = [];
@@ -314,7 +460,7 @@ export function reportFromRows(
     }
     const conflict = new Set(configSets.map((keys) => keys.join('\0'))).size > 1 || new Set(hashes).size > 1;
     const questionKeys = configSets.length ? configSets[0] : [...new Set(returnedKeys)];
-    const counted = new Map<string, any>();
+    const counted = new Map<string, GateScore>();
     const duplicated = new Set<string>();
     for (const obs of seen) {
       const pair = `${obs.itemId}\0${obs.key}`;
@@ -342,7 +488,7 @@ export function reportFromRows(
       const duplicate = duplicateItems || pairs.some((pair) => duplicated.has(pair));
       const incomplete = errored || missing || duplicate || completed !== expected;
       const parent = rowName.split(':')[0];
-      const row: Record<string, any> = {
+      const row: ScorerSummary = {
         name: rowName,
         expected,
         completed,
@@ -373,7 +519,7 @@ function relativeIncrease(baseline: number, candidate: number): number {
   return (candidate - baseline) / baseline;
 }
 
-function judgeMeasurements(scores: any[]) {
+function judgeMeasurements(scores: GateScore[]) {
   const invocations = new Map<string, number>();
   const hashes: string[] = [];
   let missing = false;
@@ -397,7 +543,7 @@ function judgeMeasurements(scores: any[]) {
   };
 }
 
-function candidateMeasurements(rows: any[]) {
+function candidateMeasurements(rows: GateRow[]) {
   let taskUsd = 0;
   let taskCoverage = 'complete';
   let sawTask = false;
@@ -445,16 +591,18 @@ function candidateMeasurements(rows: any[]) {
   };
 }
 
-function rememberEvidence(bucket: Map<string, any>, key: string, item: any) {
+function rememberEvidence(bucket: Map<string, ScorerEvidence>, key: string, item: ScorerEvidence) {
   const previous = bucket.get(key);
   if (previous && (previous.verified !== true || item.verified !== true)) bucket.set(key, { ...item, verified: false });
   else bucket.set(key, item);
 }
 
-function evidenceIndex(baseline: any) {
+type EvidenceIndex = { byId: Map<string, ScorerEvidence>; byName: Map<string, ScorerEvidence> };
+
+function evidenceIndex(baseline: GateBaseline): EvidenceIndex {
   const panel = baseline?.panel_index;
-  const byId = new Map<string, any>();
-  const byName = new Map<string, any>();
+  const byId = new Map<string, ScorerEvidence>();
+  const byName = new Map<string, ScorerEvidence>();
   for (const item of baseline?.scorer_evidence || []) {
     if (!item) continue;
     if (panel != null && Number(item.panel_index || 0) !== Number(panel)) continue;
@@ -466,7 +614,7 @@ function evidenceIndex(baseline: any) {
   return { byId, byName };
 }
 
-function evidenceForScorer(index: { byId: Map<string, any>; byName: Map<string, any> }, scorer: any) {
+function evidenceForScorer(index: EvidenceIndex, scorer: ScorerSummary | undefined): ScorerEvidence | undefined {
   if (!scorer) return undefined;
   const scorerId = String(scorer.scorer_id || '');
   if (scorerId) return index.byId.get(scorerId);
@@ -474,9 +622,9 @@ function evidenceForScorer(index: { byId: Map<string, any>; byName: Map<string, 
   return name ? index.byName.get(name) : undefined;
 }
 
-function baselineRow(scorers: any[], name: any, scorerId?: any) {
-  let byName: any;
-  const idMatches: any[] = [];
+function baselineRow(scorers: ScorerSummary[], name: unknown, scorerId?: unknown): ScorerSummary | undefined {
+  let byName: ScorerSummary | undefined;
+  const idMatches: ScorerSummary[] = [];
   const wanted = String(scorerId || '');
   for (const item of scorers || []) {
     if (!item) continue;
@@ -489,7 +637,7 @@ function baselineRow(scorers: any[], name: any, scorerId?: any) {
   return undefined;
 }
 
-function baselineRowsForName(scorers: any[], name: any, scorerId?: any) {
+function baselineRowsForName(scorers: ScorerSummary[], name: string, scorerId?: unknown): ScorerSummary[] {
   const prefix = `${name}:`;
   const children = (scorers || []).filter((item) => item && String(item.name || '').startsWith(prefix));
   if (children.length) return children;
@@ -497,7 +645,7 @@ function baselineRowsForName(scorers: any[], name: any, scorerId?: any) {
   return row ? [row] : [];
 }
 
-export function validateBaseline(baseline: any, options: Record<string, any>) {
+export function validateBaseline(baseline: GateBaseline | null | undefined, options: GateOptions) {
   if (!options.baseline_prompt && !options.baseline_experiment) return null;
   if (!baseline || baseline.missing) return fail(2, 'baseline_missing', 'Baseline was not found');
   if (baseline.panel_required || (baseline.panel_index != null && baseline.panel_index < 0)) {
@@ -508,18 +656,18 @@ export function validateBaseline(baseline: any, options: Record<string, any>) {
   const informational = new Set(options.informational || []);
   const names = selectedNames(options.scorers || []).filter((name) => !informational.has(name));
   const ids = options.scorer_ids || {};
-  const unhashed = new Set((options.unhashed_scorers || []).map((name: any) => String(name)));
+  const unhashed = new Set((options.unhashed_scorers || []).map((name) => String(name)));
   if (options.max_drop != null) {
     for (const name of names) {
       // A local function has no definition hash. Let the run finish so the
       // gate can report that, instead of a baseline problem that hides it.
       if (unhashed.has(name)) continue;
-      const matches: any[] = baselineRowsForName(baseline.scorers, name, ids[name]);
+      const matches = baselineRowsForName(baseline.scorers, name, ids[name]);
       if (!matches.length || matches.some((item) => !finite(item.pass_rate))) {
         return fail(2, 'baseline_missing', `${name} has no baseline pass rate`);
       }
       for (const base of matches) {
-        const ev: any = evidenceForScorer(evidence, base);
+        const ev = evidenceForScorer(evidence, base);
         if (!ev || ev.verified !== true) return fail(2, 'scorer_unverified', `${name} is not verified on the baseline`);
       }
     }
@@ -536,9 +684,9 @@ export function validateBaseline(baseline: any, options: Record<string, any>) {
   return null;
 }
 
-export function applyBaseline(report: Record<string, any>, baseline: any) {
+export function applyBaseline(report: GateReport, baseline: GateBaseline | null | undefined): void {
   if (!baseline || baseline.missing || baseline.panel_required) return;
-  const comparing = ['max_drop', 'max_task_cost_increase', 'max_judge_cost_increase', 'max_latency_increase'].some(
+  const comparing = (['max_drop', 'max_task_cost_increase', 'max_judge_cost_increase', 'max_latency_increase'] as const).some(
     (key) => report[key] != null,
   );
   if (comparing && (!baseline.dataset_fingerprint || !report.dataset_fingerprint || baseline.dataset_fingerprint !== report.dataset_fingerprint)) {
@@ -546,8 +694,8 @@ export function applyBaseline(report: Record<string, any>, baseline: any) {
   }
   const evidence = evidenceIndex(baseline);
   for (const scorer of report.scorers || []) {
-    const base: any = baselineRow(baseline.scorers, scorer.name, scorer.scorer_id);
-    const ev: any = evidenceForScorer(evidence, base || scorer);
+    const base = baselineRow(baseline.scorers, scorer.name, scorer.scorer_id);
+    const ev = evidenceForScorer(evidence, base || scorer);
     if (report.max_drop != null && !scorer.informational && (!ev || ev.verified !== true)) scorer.verified = false;
     if (!base) continue;
     scorer.baseline_pass_rate = base.pass_rate;
@@ -599,7 +747,7 @@ export function applyBaseline(report: Record<string, any>, baseline: any) {
   }
 }
 
-export function commentBody(summary: Record<string, any>, commentKey: string): string {
+export function commentBody(summary: Partial<Pick<GateOutcome, 'label' | 'failures'>>, commentKey: string): string {
   const lines = [`<!-- traccia-eval:${commentKey} -->`, `**${summary.label || 'Failed'}**`];
   for (const failure of summary.failures || []) {
     lines.push(`- \`${failure.code}\` ${failure.message}`);

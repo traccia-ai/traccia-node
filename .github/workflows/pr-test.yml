@@ -1,28 +1,52 @@
-name: PR Test
+name: Tests
 
+# Runs typecheck, lint, build and the jest suite. Also called by npm-publish.yml, so
+# nothing is published to npm unless these pass first.
 on:
   pull_request:
     branches:
       - main
       - development
       - staging
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
-      pull-requests: write
+      contents: read
+      pull-requests: write  # only used by the CTRF comment on pull requests
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with "engines" in package.json.
+        node-version: ['18.x', '20.x', '22.x', '24.x']
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          node-version: '20.x'
-          
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+
       - name: Install Dependencies
         run: npm ci
+
+      - name: Typecheck
+        run: npx --no-install tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
 
       - name: Build
         run: npm run build
@@ -30,11 +54,12 @@ jobs:
       - name: Test
         run: npm run test:cov
 
+      # One comment per PR (from the 20.x job), never during a publish run.
       - name: Publish CTRF Test Summary Results
-        uses: ctrf-io/github-test-reporter@v1
+        uses: ctrf-io/github-test-reporter@dbb08957b5b2af918b39136ab2c5532002c7649b  # v1.3.2
         with:
           report-path: './ctrf/ctrf-report.json'
           pull-request-report: true
-        if: always()
+        if: always() && github.event_name == 'pull_request' && matrix.node-version == '20.x'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}

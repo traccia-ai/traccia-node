@@ -139,7 +139,7 @@ export function loadConfig(configFile?: string): TracciaConfig {
   if (configPath) {
     try {
       const fileContent = fs.readFileSync(configPath, 'utf-8');
-      const parsedToml = toml.parse(fileContent);
+      const parsedToml = toml.parse(fileContent) as Partial<TracciaConfig>;
       config = {
         ...defaultConfig,
         ...parsedToml,
@@ -155,10 +155,9 @@ export function loadConfig(configFile?: string): TracciaConfig {
       if (process.env[envVar]) {
         const value = process.env[envVar];
         const keys = configKey.split('.');
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let current: any = config;
+        let current = config as unknown as Record<string, unknown>;
         for (let i = 0; i < keys.length - 1; i++) {
-          current = current[keys[i]];
+          current = current[keys[i]] as Record<string, unknown>;
         }
         const lastKey = keys[keys.length - 1];
         if (typeof current[lastKey] === 'boolean') {

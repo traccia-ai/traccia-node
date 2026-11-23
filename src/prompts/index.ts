@@ -74,7 +74,7 @@ export async function loadPrompt(options: LoadPromptOptions): Promise<LoadedProm
         return LoadedPrompt.fromPayload(cached.entry.payload, { isStale: false });
       }
       cache.staleWhileRevalidate(key, doFetch);
-      console.info(`[traccia.prompts] prompt_stale_served: serving cached prompt for ${key}`);
+      console.info(`[traccia.prompts] prompt_stale_served: serving cached prompt for ${key.join(',')}`);
       return LoadedPrompt.fromPayload(cached.entry.payload, { isStale: true });
     }
   }

@@ -1,90 +1,114 @@
 name: Publish to NPM
 
+# Release routine: bump "version" in package.json on main (through a PR), then
+# publish a GitHub release (tag vX.Y.Z, with your release notes). That starts
+# this workflow. Run it by hand only to retry a release that failed.
 on:
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to publish (e.g., 0.1.0)'
-        required: true
-        type: string
+
+permissions:
+  contents: read
+
+# Never run two publishes at once.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Typecheck, lint, build and the full jest suite on every supported Node version.
+  tests:
+    uses: ./.github/workflows/pr-test.yml
     permissions:
-      contents: write
-      id-token: write  # Required for npm provenance
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      contents: read
+      pull-requests: write  # pr-test.yml asks for it; its comment step is skipped outside pull requests
 
-      - uses: actions/setup-node@v4
+  # Build the package tarball with no npm access and no write access.
+  build:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '20.x'
-          registry-url: 'https://registry.npmjs.org'
 
-      # Fail before anything is tagged if the token is expired or revoked.
-      - name: Verify npm auth
-        run: npm whoami
+      # Catches a release made before bumping package.json, or tagged with the wrong version.
+      - name: Check version
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Check version is new
-        if: github.event_name == 'workflow_dispatch'
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          if npm view "@traccia/sdk@${{ inputs.version }}" version >/dev/null 2>&1; then
-            echo "::error::@traccia/sdk@${{ inputs.version }} is already on npm"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_EVENT_NAME" = release ] && [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Release tag $TAG does not match package.json version $VERSION (expected v$VERSION)"
             exit 1
           fi
-          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "::error::Tag v${{ inputs.version }} already exists. Pick the next version"
+          if npm view "@traccia/sdk@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::@traccia/sdk@$VERSION is already on npm. Bump version in package.json first"
             exit 1
           fi
 
-      - name: Git Config
-        if: github.event_name == 'workflow_dispatch'
+      # The bundled prices are copied from traccia-py in the version bump PR
+      # (npm run pricing:snapshot); this refuses a release whose prices weren't
+      # checked against LiteLLM in the last 14 days.
+      - name: Check pricing snapshot is fresh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      # A re-run checks out the original commit, so move to the branch tip before bumping.
-      - name: Sync to branch tip
-        if: github.event_name == 'workflow_dispatch'
-        run: git pull --ff-only origin "${GITHUB_REF_NAME}"
-
-      - name: Bump version (local only)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          npm version ${{ inputs.version }} -m "chore: release v%s"
+          node -e '
+            const generatedAt = require("./data/pricing_snapshot.json").generated_at;
+            const days = Math.floor((Date.now() - new Date(generatedAt).getTime()) / 86400000);
+            if (!(days <= 14)) {
+              console.log(`::error::data/pricing_snapshot.json is ${days} days old (generated_at=${generatedAt}). Run npm run pricing:snapshot in the version bump PR, after releasing traccia-py.`);
+              process.exit(1);
+            }
+            console.log(`Pricing snapshot is ${days} days old`);
+          '
 
       - name: Install Dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Build and pack
+        run: |
+          npm run build
+          npm pack
+          mv traccia-sdk-*.tgz package.tgz
 
-      - name: Test
-        run: npm run test
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: package
+          path: package.tgz
+          retention-days: 7
+
+  # Publishes with npm trusted publishing: npm checks this job's GitHub OIDC
+  # token, so there is no npm token to steal. Waits for approval in the "npm"
+  # environment and runs no project code: it publishes the tarball built above.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@traccia/sdk
+    permissions:
+      id-token: write  # Required for trusted publishing and provenance
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: package
+
+      # Trusted publishing needs npm 11.5.1 or newer, which ships with Node 24.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '24.x'
 
       - name: Publish to NPM
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      # Push and release only after npm has the package, so a tag always means it shipped.
-      - name: Push version commit and tag
-        if: github.event_name == 'workflow_dispatch'
         run: |
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-          git push origin "v${{ inputs.version }}"
-
-      - name: Create GitHub Release
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create v${{ inputs.version }} --generate-notes
+          npm --version
+          npm publish ./package.tgz --provenance --access public --ignore-scripts

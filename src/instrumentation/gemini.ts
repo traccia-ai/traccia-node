@@ -9,6 +9,8 @@
  * surface is not instrumented.
  */
 
+import { createRequire } from 'module';
+import { join } from 'path';
 import { getTracer } from '../auto';
 import { SpanStatus, ISpan } from '../types';
 import { enforceLlmCall, finishLlmCall } from '../governance/pep';
@@ -68,9 +70,6 @@ function requireGenai(): { GoogleGenAI?: { prototype?: object }; default?: { pro
         return require('@google/genai');
     } catch {
         try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-            const { createRequire } = require('module');
-            const { join } = require('path');
             return createRequire(join(process.cwd(), 'package.json'))('@google/genai');
         } catch {
             return null;
@@ -141,7 +140,7 @@ export function patchGemini(): boolean {
                 configurable: true,
                 enumerable: desc.enumerable,
                 get: function patchedInteractionsGetter(this: unknown) {
-                    const value = desc.get!.call(this);
+                    const value = desc.get.call(this);
                     if (value && typeof value === 'object') {
                         patchInteractionsCreate(value as { create?: PatchedFn });
                     }
@@ -289,7 +288,7 @@ export function wrapGeminiInteractionsCreate<T>(
             attributes['llm.streaming'] = true;
         }
 
-        return tracer.startActiveSpan('llm.gemini.interaction', async (span: ISpan) => {
+        return await tracer.startActiveSpan('llm.gemini.interaction', async (span: ISpan) => {
             for (const [key, value] of Object.entries(attributes)) {
                 span.setAttribute(key, value);
             }

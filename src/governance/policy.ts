@@ -321,7 +321,7 @@ export async function checkAgentStatus(
   }
 
   let inflightPromise = inflight.get(key);
-  if (!inflightPromise) {
+  if (inflightPromise === undefined) {
     inflightPromise = fetchStatus(apiKey, baseUrl, url, agentId).finally(() => {
       inflight.delete(key);
     });

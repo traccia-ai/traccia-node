@@ -101,6 +101,7 @@ export function validateGuardrailAttributes(
  * span.end();
  * ```
  */
+// eslint-disable-next-line @typescript-eslint/require-await -- public API returns a Promise
 export async function guardrailSpan(
   name: string,
   options?: GuardrailSpanOptions,
