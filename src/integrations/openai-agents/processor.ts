@@ -88,6 +88,24 @@ function rememberEnded(map: Map<string, TracciaSpanLike>, key: string, span: Tra
   }
 }
 
+/** How long a span waits for its declared parent's start callback before falling back to the trace root. */
+const DEFAULT_PARENT_WAIT_MS = 5_000;
+/** How many spans can wait for their parent at once; the oldest is released past this. */
+const PENDING_LIMIT = 1024;
+
+/** A span whose declared parent has not started yet: its callbacks, held until it does. */
+interface PendingSpan {
+  start: AgentsSpan;
+  parentId: string;
+  end?: AgentsSpan;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+export interface TracciaAgentsTracingProcessorOptions {
+  /** Milliseconds a span waits for its parent's start callback (default 5000). */
+  parentWaitMs?: number;
+}
+
 /**
  * Traccia processor for OpenAI Agents SDK.
  *
@@ -97,11 +115,25 @@ function rememberEnded(map: Map<string, TracciaSpanLike>, key: string, span: Tra
  * parented explicitly on the Traccia span of its Agents parent.
  *
  * The Agents SDK delivers span callbacks without awaiting them, after earlier
- * processors, so they can arrive late and after the trace's end callback. Spans
- * therefore use the framework's timestamps, and recently ended traces and spans stay
- * resolvable as parents so a late callback still joins its trace.
+ * processors, so they can arrive late, out of order, and after the trace's end
+ * callback. Spans therefore use the framework's timestamps; recently ended traces and
+ * spans stay resolvable as parents; and a span whose declared parent has not started
+ * yet is held until it does (or, if it never does, until `parentWaitMs`, then placed
+ * under its trace root), since a Traccia span's parent cannot be changed once started.
  */
 export class TracciaAgentsTracingProcessor {
+  private readonly parentWaitMs: number;
+  /** Agents spanId -> held span, and Agents parentId -> spanIds waiting on it. */
+  private pending: Map<string, PendingSpan> = new Map();
+  private waitingOn: Map<string, string[]> = new Map();
+  /** Bounded: end callbacks that arrived before their span's start callback. */
+  private earlyEnds: Map<string, AgentsSpan> = new Map();
+
+  constructor(options: TracciaAgentsTracingProcessorOptions = {}) {
+    const wait = options.parentWaitMs;
+    this.parentWaitMs = typeof wait === "number" && wait >= 0 ? wait : DEFAULT_PARENT_WAIT_MS;
+  }
+
   /** Agents traceId -> root Traccia span and the latest end time of its spans. */
   private traceMap: Map<string, { span: TracciaSpanLike; lastEndNs?: number }> = new Map();
   /** Agents spanId -> Traccia span and its Agents traceId. */
@@ -165,30 +197,117 @@ export class TracciaAgentsTracingProcessor {
 
   onSpanStart(span: AgentsSpan): void {
     try {
-      const spanData = span.spanData;
-      const spanName = this.getSpanName(spanData);
-      const attributes = this.extractAttributes(spanData);
-      if (span.traceId) attributes["agents.trace_id"] = span.traceId;
-      attributes["agents.span_id"] = span.spanId;
-      if (span.parentId) attributes["agents.parent_id"] = span.parentId;
-
-      const parent = this.resolveParent(span);
-      let startTimeNs = isoToNs(span.startedAt);
-      if (startTimeNs !== undefined && typeof parent?.startTimeNs === "number") {
-        // ISO timestamps carry milliseconds; keep children inside their parent.
-        startTimeNs = Math.max(startTimeNs, parent.startTimeNs);
+      if (span.parentId && !this.parentKnown(span.parentId)) {
+        this.hold(span, span.parentId);
+        return;
       }
-
-      const tracciaSpan = this.getTracer().startSpan(spanName, { attributes, parent, startTimeNs });
-      this.spanMap.set(span.spanId, { span: tracciaSpan, traceId: span.traceId });
+      this.startSpan(span);
     } catch {
       // Don't break agent execution on tracing errors
     }
   }
 
-  onSpanEnd(span: AgentsSpan): void {
-    const entry = this.spanMap.get(span.spanId);
+  /** True once the parent's Traccia span exists (running or recently ended). */
+  private parentKnown(parentId: string): boolean {
+    return this.spanMap.has(parentId) || this.endedSpans.has(parentId);
+  }
+
+  /** Hold a span until its declared parent starts, with a bounded wait. */
+  private hold(span: AgentsSpan, parentId: string): void {
+    const entry: PendingSpan = { start: span, parentId };
+    this.pending.set(span.spanId, entry);
+    const siblings = this.waitingOn.get(parentId) ?? [];
+    siblings.push(span.spanId);
+    this.waitingOn.set(parentId, siblings);
+    entry.timer = setTimeout(() => this.release(span.spanId), this.parentWaitMs);
+    // Never keep the process alive just to place a span.
+    (entry.timer as { unref?: () => void }).unref?.();
+    if (this.pending.size > PENDING_LIMIT) {
+      for (const oldest of this.pending.keys()) {
+        this.release(oldest);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Stop waiting: start a held span under whatever its parent resolves to now (its
+   * parent, or the trace root if the parent never arrived), then replay its end.
+   */
+  private release(spanId: string): void {
+    const entry = this.pending.get(spanId);
     if (!entry) return;
+    this.pending.delete(spanId);
+    if (entry.timer) clearTimeout(entry.timer);
+    const parentId = entry.parentId;
+    const siblings = this.waitingOn.get(parentId)?.filter((id) => id !== spanId) ?? [];
+    if (siblings.length) this.waitingOn.set(parentId, siblings);
+    else this.waitingOn.delete(parentId);
+    try {
+      this.startSpan(entry.start);
+      if (entry.end) this.onSpanEnd(entry.end);
+    } catch {
+      // Don't break agent execution on tracing errors
+    }
+  }
+
+  /** Start a span's Traccia span, then release any spans that were waiting on it. */
+  private startSpan(span: AgentsSpan): void {
+    this.createSpan(span);
+    const waiting = this.waitingOn.get(span.spanId);
+    if (waiting) {
+      for (const childId of [...waiting]) this.release(childId);
+    }
+    // Its end arrived first (its start was delayed more): end it now.
+    const earlyEnd = this.earlyEnds.get(span.spanId);
+    if (earlyEnd) {
+      this.earlyEnds.delete(span.spanId);
+      this.onSpanEnd(earlyEnd);
+    }
+  }
+
+  private createSpan(span: AgentsSpan): void {
+    const spanData = span.spanData;
+    const spanName = this.getSpanName(spanData);
+    const attributes = this.extractAttributes(spanData);
+    if (span.traceId) attributes["agents.trace_id"] = span.traceId;
+    attributes["agents.span_id"] = span.spanId;
+    if (span.parentId) attributes["agents.parent_id"] = span.parentId;
+
+    const parent = this.resolveParent(span);
+    // Missing timestamps fall back to now on the SDK's (Date) clock, as the root does.
+    let startTimeNs = isoToNs(span.startedAt) ?? nowNs();
+    if (typeof parent?.startTimeNs === "number") {
+      // ISO timestamps carry milliseconds; keep children inside their parent.
+      startTimeNs = Math.max(startTimeNs, parent.startTimeNs);
+    }
+
+    const tracciaSpan = this.getTracer().startSpan(spanName, { attributes, parent, startTimeNs });
+    this.spanMap.set(span.spanId, { span: tracciaSpan, traceId: span.traceId });
+  }
+
+  onSpanEnd(span: AgentsSpan): void {
+    const held = this.pending.get(span.spanId);
+    if (held) {
+      // Still waiting for its parent: end it when it is started.
+      held.end = span;
+      return;
+    }
+    const entry = this.spanMap.get(span.spanId);
+    if (!entry) {
+      // Not started yet (its start callback is delayed): end it when it starts.
+      // An end for a span already ended is a duplicate and is ignored.
+      if (!this.endedSpans.has(span.spanId)) {
+        this.earlyEnds.set(span.spanId, span);
+        if (this.earlyEnds.size > RECENTLY_ENDED_LIMIT) {
+          for (const oldest of this.earlyEnds.keys()) {
+            this.earlyEnds.delete(oldest);
+            break;
+          }
+        }
+      }
+      return;
+    }
     this.spanMap.delete(span.spanId);
     const tracciaSpan = entry.span;
     rememberEnded(this.endedSpans, span.spanId, tracciaSpan);
@@ -353,13 +472,22 @@ export class TracciaAgentsTracingProcessor {
   }
 
   shutdown(): void {
+    this.releaseAll();
     this.traceMap.clear();
     this.spanMap.clear();
     this.endedTraces.clear();
     this.endedSpans.clear();
+    this.earlyEnds.clear();
   }
 
   forceFlush(): void {
-    // Traccia handles flushing at the provider level
+    // Spans still waiting for a parent are placed now so they reach the exporter;
+    // Traccia flushes at the provider level.
+    this.releaseAll();
+  }
+
+  /** Start every held span, under its trace root when its parent never arrived. */
+  private releaseAll(): void {
+    for (const spanId of [...this.pending.keys()]) this.release(spanId);
   }
 }

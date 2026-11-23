@@ -235,6 +235,97 @@ describe('OpenAI Agents processor hierarchy (TRC-294)', () => {
     expect(s['agent.custom.top'].parentSpanId).toBe(s['wf'].context.spanId);
   });
 
+  it('holds a child whose parent start callback is delayed, then links it to that parent', () => {
+    // An earlier processor delays the parent's start: the child's start and end arrive first.
+    processor.onTraceStart({ traceId: 'trace_d', name: 'wf' });
+    processor.onSpanStart(span('child', 'trace_d', 'agent', 'function', 'lookup'));
+    processor.onSpanStart(span('grandchild', 'trace_d', 'child', 'custom', 'inner'));
+    processor.onSpanEnd(span('grandchild', 'trace_d', 'child', 'custom', 'inner'));
+    processor.onSpanEnd(span('child', 'trace_d', 'agent', 'function', 'lookup'));
+    expect(ended).toHaveLength(0); // nothing placed under the root in the meantime
+    processor.onSpanStart(span('agent', 'trace_d', null, 'agent', 'triage'));
+    processor.onSpanEnd(span('agent', 'trace_d', null, 'agent', 'triage'));
+    processor.onTraceEnd({ traceId: 'trace_d' });
+
+    const s = byName();
+    expect(Object.keys(s).sort()).toEqual(['agent.custom.inner', 'agent.tool.lookup', 'agent.triage', 'wf']);
+    expect(traceIds(ended)).toEqual(new Set([s['wf'].context.traceId]));
+    expect(s['agent.triage'].parentSpanId).toBe(s['wf'].context.spanId);
+    expect(s['agent.tool.lookup'].parentSpanId).toBe(s['agent.triage'].context.spanId);
+    expect(s['agent.custom.inner'].parentSpanId).toBe(s['agent.tool.lookup'].context.spanId);
+    expect((processor as any).pending.size).toBe(0);
+    expect((processor as any).waitingOn.size).toBe(0);
+  });
+
+  it('ends a span whose end callback arrived before its delayed start', () => {
+    const t0 = Date.now();
+    const agent = { startedAt: iso(t0 + 10), endedAt: iso(t0 + 90) };
+    processor.onTraceStart({ traceId: 'trace_ee', name: 'wf' });
+    processor.onSpanStart(span('turn', 'trace_ee', 'agent', 'custom', 'turn'));
+    processor.onSpanEnd(span('turn', 'trace_ee', 'agent', 'custom', 'turn'));
+    processor.onSpanEnd(span('agent', 'trace_ee', null, 'agent', 'triage', agent)); // before its start
+    processor.onSpanStart(span('agent', 'trace_ee', null, 'agent', 'triage', agent));
+    processor.onSpanEnd(span('agent', 'trace_ee', null, 'agent', 'triage', agent)); // a duplicate is ignored
+    processor.onTraceEnd({ traceId: 'trace_ee' });
+
+    const s = byName();
+    expect(ended.map((x) => x.name).sort()).toEqual(['agent.custom.turn', 'agent.triage', 'wf']);
+    expect(s['agent.triage'].endTimeNs).toBe(msToNs(t0 + 90));
+    expect(s['agent.custom.turn'].parentSpanId).toBe(s['agent.triage'].context.spanId);
+    expect((processor as any).earlyEnds.size).toBe(0);
+  });
+
+  it('keeps framework timestamps for a held child', () => {
+    const t0 = Date.now();
+    processor.onTraceStart({ traceId: 'trace_dt', name: 'wf' });
+    const times = { startedAt: iso(t0 + 20), endedAt: iso(t0 + 70) };
+    processor.onSpanStart(span('child', 'trace_dt', 'agent', 'function', 'lookup', times));
+    processor.onSpanEnd(span('child', 'trace_dt', 'agent', 'function', 'lookup', times));
+    processor.onSpanStart(span('agent', 'trace_dt', null, 'agent', 'triage', { startedAt: iso(t0 + 10) }));
+    processor.onSpanEnd(span('agent', 'trace_dt', null, 'agent', 'triage', { startedAt: iso(t0 + 10), endedAt: iso(t0 + 90) }));
+    processor.onTraceEnd({ traceId: 'trace_dt' });
+    const c = byName()['agent.tool.lookup'];
+    expect(c.startTimeNs).toBe(msToNs(t0 + 20));
+    expect(c.endTimeNs).toBe(msToNs(t0 + 70));
+  });
+
+  it('places a held child under the trace root when its parent never arrives', async () => {
+    processor = new TracciaAgentsTracingProcessor({ parentWaitMs: 10 });
+    (processor as any).tracer = provider.getTracer('openai.agents');
+    processor.onTraceStart({ traceId: 'trace_o', name: 'wf' });
+    processor.onSpanStart(span('child', 'trace_o', 'missing', 'function', 'lookup'));
+    processor.onSpanEnd(span('child', 'trace_o', 'missing', 'function', 'lookup'));
+    processor.onTraceEnd({ traceId: 'trace_o' });
+    expect(byName()['agent.tool.lookup']).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 40));
+    const s = byName();
+    expect(s['agent.tool.lookup'].parentSpanId).toBe(s['wf'].context.spanId);
+    expect(s['agent.tool.lookup'].context.traceId).toBe(s['wf'].context.traceId);
+    expect((processor as any).pending.size).toBe(0);
+  });
+
+  it('forceFlush() and shutdown() place spans still waiting for a parent', () => {
+    processor.onTraceStart({ traceId: 'trace_ff', name: 'wf' });
+    processor.onSpanStart(span('child', 'trace_ff', 'missing', 'function', 'lookup'));
+    processor.onSpanEnd(span('child', 'trace_ff', 'missing', 'function', 'lookup'));
+    processor.forceFlush();
+    expect(byName()['agent.tool.lookup']).toBeDefined();
+    processor.onSpanStart(span('child2', 'trace_ff', 'missing2', 'custom', 'two'));
+    processor.shutdown();
+    expect((processor as any).pending.size).toBe(0);
+  });
+
+  it('bounds how many spans wait for a parent', () => {
+    processor.onTraceStart({ traceId: 'trace_b', name: 'wf' });
+    for (let i = 0; i < 1030; i++) {
+      processor.onSpanStart(span(`c${i}`, 'trace_b', `missing${i}`, 'custom', `c${i}`));
+    }
+    expect((processor as any).pending.size).toBe(1024);
+    expect((processor as any).pending.has('c0')).toBe(false); // oldest released to the root
+    expect((processor as any).spanMap.has('c0')).toBe(true);
+    processor.shutdown();
+  });
+
   it('bounds how many ended traces and spans it remembers', () => {
     for (let i = 0; i < 1100; i++) {
       processor.onTraceStart({ traceId: `t${i}`, name: 'wf' });
@@ -257,6 +348,7 @@ describe('OpenAI Agents processor hierarchy (TRC-294)', () => {
     processor.onSpanEnd(span('a', 'trace_x', 'never_seen', 'agent', 'triage'));
     expect(() => processor.onTraceEnd({ traceId: 'trace_x' })).not.toThrow();
     expect(() => processor.onSpanEnd(span('nope', 'trace_x', null, 'agent', 'x'))).not.toThrow();
+    processor.forceFlush(); // stop waiting for the parent that will never start
     const s = byName();
     expect(Object.keys(s).sort()).toEqual(['agent.tool.lookup', 'agent.triage']);
     expect(s['agent.triage'].parentSpanId).toBeUndefined();
