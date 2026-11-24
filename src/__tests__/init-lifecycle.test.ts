@@ -6,7 +6,7 @@ import { loadPricingWithSource } from '../config/pricing-config';
 import { loadConfig } from '../config/config';
 import { configureGovernance } from '../governance/config';
 import { getClientConfig, setClientConfig, clearClientConfig } from '../config/client-config';
-import { getResolver, setResolver, CostResolver } from '../processor/cost-resolver';
+import { getResolver, setResolver, peekResolver, restoreResolver, CostResolver } from '../processor/cost-resolver';
 import { TracerProvider } from '../tracer/provider';
 import { ISpanExporter, ISpanProcessor, SDKConfig } from '../types';
 
@@ -47,6 +47,9 @@ function baseLoadedConfig(): ReturnType<typeof loadConfig> {
   } as unknown as ReturnType<typeof loadConfig>;
 }
 
+/** Every deferred a test created, so afterEach can release a setup a failed test left paused. */
+const pendingDeferreds: Array<{ resolve: (v: never) => void }> = [];
+
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
@@ -54,7 +57,9 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: 
     resolve = res;
     reject = rej;
   });
-  return { promise, resolve, reject };
+  const d = { promise, resolve, reject };
+  pendingDeferreds.push(d as unknown as { resolve: (v: never) => void });
+  return d;
 }
 
 function fakeExporter(): ISpanExporter & { export: jest.Mock; shutdown: jest.Mock } {
@@ -79,11 +84,17 @@ async function flush(): Promise<void> {
 
 /** Processors a clean, successful init() adds with these settings. */
 let expectedProcessorCount: number;
+/** The SIGTERM/SIGINT listener init() registers. */
+let signalHook: () => Promise<void>;
 
 beforeAll(async () => {
   mockLoadConfig.mockReturnValue(baseLoadedConfig());
   mockLoadPricing.mockResolvedValue(PRICING_OK);
+  const before = process.listeners('SIGTERM');
   const provider = await init(cfg());
+  const added = process.listeners('SIGTERM').filter((l) => !before.includes(l));
+  expect(added).toHaveLength(1);
+  signalHook = added[0] as () => Promise<void>;
   expectedProcessorCount = processorsOf(provider).length;
   await stopTracing();
 });
@@ -97,6 +108,14 @@ beforeEach(async () => {
   jest.clearAllMocks();
   mockLoadConfig.mockReturnValue(baseLoadedConfig());
   mockLoadPricing.mockResolvedValue(PRICING_OK);
+});
+
+afterEach(async () => {
+  // A test that failed before settling its pricing promise would otherwise leave init() paused,
+  // and every later stopTracing() would wait on it. Resolve (not reject), so the abandoned init()
+  // does not surface as an unhandled rejection in the next test. Settling twice is a no-op.
+  for (const d of pendingDeferreds.splice(0)) d.resolve(PRICING_OK as never);
+  await runtimeState().initializing?.catch(() => undefined);
 });
 
 afterAll(async () => {
@@ -319,6 +338,26 @@ describe('TRC-297 init lifecycle', () => {
       expect(getResolver()).toBe(prevResolver);
       clearClientConfig();
     });
+
+    it('a failure with no resolver set before leaves none, and does not create one to save it', async () => {
+      restoreResolver(undefined);
+      const pricing = deferred<typeof PRICING_OK>();
+      mockLoadPricing.mockReturnValueOnce(pricing.promise);
+
+      const attempt = init(cfg());
+      await flush();
+      // Saving the previous resolver must not build one (that parses the bundled snapshot).
+      expect(peekResolver()).toBeUndefined();
+      pricing.reject(new Error('boom'));
+      await expect(attempt).rejects.toThrow('boom');
+      expect(peekResolver()).toBeUndefined();
+    });
+
+    it('init() with cost tracking off creates no resolver', async () => {
+      restoreResolver(undefined);
+      await init(cfg({ enableCostTracking: false }));
+      expect(peekResolver()).toBeUndefined();
+    });
   });
 
   describe('stop / re-init lifecycle', () => {
@@ -342,6 +381,42 @@ describe('TRC-297 init lifecycle', () => {
       expect(exporter.shutdown).toHaveBeenCalled();
       expect(isTracingStarted()).toBe(false);
       expect(runtimeState().provider).toBeNull();
+    });
+
+    it('the SIGTERM/SIGINT hook during setup waits for it, then shuts the whole provider down', async () => {
+      const exporter = fakeExporter();
+      const pricing = deferred<typeof PRICING_OK>();
+      mockLoadPricing.mockReturnValueOnce(pricing.promise);
+
+      const starting = init(cfg({ exporter }));
+      await flush();
+      const provider = runtimeState().provider!;
+      let hookDone = false;
+      const hook = signalHook().then(() => {
+        hookDone = true;
+      });
+      await flush();
+      expect(hookDone).toBe(false);
+      expect(exporter.shutdown).not.toHaveBeenCalled();
+
+      pricing.resolve(PRICING_OK);
+      await starting;
+      await hook;
+      // The batch processor (and its exporter) was added before the shutdown, so it was shut down.
+      expect(processorsOf(provider)).toHaveLength(expectedProcessorCount);
+      expect(exporter.shutdown).toHaveBeenCalled();
+    });
+
+    it('the signal hook during a setup that fails still completes', async () => {
+      const pricing = deferred<typeof PRICING_OK>();
+      mockLoadPricing.mockReturnValueOnce(pricing.promise);
+
+      const starting = init(cfg());
+      await flush();
+      const hook = signalHook();
+      pricing.reject(new Error('boom'));
+      await expect(starting).rejects.toThrow('boom');
+      await expect(hook).resolves.toBeUndefined();
     });
 
     it('stopTracing() during a setup that fails still completes', async () => {

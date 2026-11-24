@@ -35,7 +35,7 @@ import {
   getAgentName,
   getEnv as getRuntimeEnv,
 } from './config/runtime-config';
-import { CostResolver, getResolver, setResolver } from './processor/cost-resolver';
+import { CostResolver, peekResolver, restoreResolver, setResolver } from './processor/cost-resolver';
 import { SDKConfig, ISpanExporter, ISpanProcessor, ITracer } from './types';
 import { configureGovernance } from './governance/config';
 import { drainOpenCalls, settleOpenCalls, SHUTDOWN_SETTLE_TIMEOUT_MS } from './governance/pep';
@@ -174,7 +174,8 @@ async function setUp(config: SDKConfig): Promise<TracerProvider> {
   const provider = getTracerProvider();
   const previousSampler = provider.getSampler();
   const previousClientConfig = getClientConfig();
-  const previousResolver = getResolver();
+  // Peek, not getResolver(): that would parse the bundled pricing snapshot just to save it.
+  const previousResolver = peekResolver();
   const added: ISpanProcessor[] = [];
   const addProcessor = (processor: ISpanProcessor): void => {
     provider.addSpanProcessor(processor);
@@ -198,7 +199,7 @@ async function setUp(config: SDKConfig): Promise<TracerProvider> {
     } else {
       clearClientConfig();
     }
-    setResolver(previousResolver);
+    restoreResolver(previousResolver);
     throw error;
   }
 }
@@ -532,6 +533,11 @@ function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcess
         // A stopTracing() in progress settles the calls and shuts the provider down.
         await state.stopping;
         return;
+      }
+      // An init() setting up again after a stopTracing(): let it finish (or roll back) first, as
+      // stopTracing() does, so its processors are not added to a provider already shut down.
+      if (state.initializing !== undefined) {
+        await state.initializing.catch(() => undefined);
       }
       // The provider in use now (stopTracing() and a later init() replace the first one), read
       // before the wait below.

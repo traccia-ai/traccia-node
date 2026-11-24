@@ -20,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The agent enricher prices a span the cost processor left unpriced with the span's `llm.vendor` and cached input tokens, as the cost processor does, so a Groq span is never priced at another provider's rate
 - `init()` called again while a first `init()` is still setting up now waits for it and returns the fully configured provider, instead of one with only some of its span processors (no exporter yet). `isTracingStarted()` is true only once setup has finished
 - A failed `init()` (for example a pricing or config error) no longer leaves the SDK marked as started with a partial provider that every later `init()` returned. The processors it added are removed and shut down, its sampler, client credentials and cost resolver are restored, and the next `init()` sets up again. Calls waiting on the failed setup reject with its error
-- `init()` called while `stopTracing()` is in progress waits for the stop and starts a fresh provider, instead of returning the one being shut down. `stopTracing()` called while `init()` is setting up waits for it to finish, then stops
+- `init()` called while `stopTracing()` is in progress waits for the stop and starts a fresh provider, instead of returning the one being shut down. `stopTracing()`, or the SIGTERM/SIGINT hook, called while `init()` is setting up waits for it to finish, then stops
 
 ## [0.1.21] - 2026-11-21
 
