@@ -18,7 +18,7 @@ import { OtlpExporter } from './exporter/otlp-exporter';
 import { ConsoleExporter } from './exporter/console-exporter';
 import { FileExporter } from './exporter/file-exporter';
 import { loadConfig } from './config/config';
-import { setClientConfig, clearClientConfig } from './config/client-config';
+import { setClientConfig, clearClientConfig, getClientConfig } from './config/client-config';
 import { loadEnvFile, findAgentConfigPath } from './config/env-config';
 import { getActiveSourceRef, loadPricingWithSource } from './config/pricing-config';
 import { resolveServiceName } from './config/service-name';
@@ -35,8 +35,8 @@ import {
   getAgentName,
   getEnv as getRuntimeEnv,
 } from './config/runtime-config';
-import { CostResolver, setResolver } from './processor/cost-resolver';
-import { SDKConfig, ISpanExporter, ITracer } from './types';
+import { CostResolver, getResolver, setResolver } from './processor/cost-resolver';
+import { SDKConfig, ISpanExporter, ISpanProcessor, ITracer } from './types';
 import { configureGovernance } from './governance/config';
 import { drainOpenCalls, settleOpenCalls, SHUTDOWN_SETTLE_TIMEOUT_MS } from './governance/pep';
 import { configurePrompts } from './prompts';
@@ -55,6 +55,11 @@ export interface TracciaRuntime {
   costProvider?: TracerProvider | null;
   /** The stopTracing() in progress; calls made meanwhile return it. */
   stopping?: Promise<void>;
+  /**
+   * The init() in progress. Concurrent init() calls share it, and `started` is set only once it
+   * succeeds; a stopTracing() made meanwhile waits for it to settle first.
+   */
+  initializing?: Promise<TracerProvider>;
   /** Each provider's shutdown, so stopTracing() and the signal hook shut it down once. */
   providerShutdowns?: WeakMap<TracerProvider, Promise<void>>;
 }
@@ -110,20 +115,99 @@ function applyGovernanceConfig(config: SDKConfig): void {
   });
 }
 
+/**
+ * Initialize tracing.
+ *
+ * Lifecycle (TRC-297):
+ * - Concurrent calls share one setup and resolve to the same, fully configured provider. If that
+ *   setup fails, every caller waiting on it rejects with its error.
+ * - `started` becomes true only after setup succeeds. A failed setup removes the processors it
+ *   added and restores the sampler, client credentials and cost resolver, so a later init()
+ *   runs setup again from the start.
+ * - A call made while stopTracing() is in progress waits for the stop, then initializes afresh.
+ *   stopTracing() called during setup waits for the setup to settle, then stops.
+ * - Once started, init() keeps tracing as it is and applies only this call's governance config.
+ */
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
-  if (runtimeState().started) {
+  const state = runtimeState();
+  // A stop in progress finishes first; this call then sees its result (started false).
+  while (state.stopping !== undefined) {
+    await state.stopping.catch(() => undefined);
+  }
+
+  if (state.initializing !== undefined) {
+    const provider = await state.initializing;
+    applyGovernanceConfig(config);
+    return provider;
+  }
+
+  if (state.started) {
     // Tracing stays as it is, but policy checks start afresh (TRC-342): no
     // remembered fail mode, and this call's policyFailMode applies.
     applyGovernanceConfig(config);
     return getTracerProvider();
   }
 
-  runtimeState().started = true;
+  // Set synchronously after the checks above, so a call made while setup awaits shares it.
+  const initializing: Promise<TracerProvider> = setUp(config)
+    .then((provider) => {
+      state.started = true;
+      return provider;
+    })
+    .finally(() => {
+      if (state.initializing === initializing) {
+        state.initializing = undefined;
+      }
+    });
+  state.initializing = initializing;
+  return initializing;
+}
 
+/**
+ * Configure the global provider for init(). On failure, undo what it changed on the provider and
+ * in shared state, then rethrow.
+ */
+async function setUp(config: SDKConfig): Promise<TracerProvider> {
   // Get or create provider. Its own OTel provider creates Traccia spans and
   // carries the sampler; registering it globally is best effort, since OTel
   // keeps the first global provider for the life of the process.
   const provider = getTracerProvider();
+  const previousSampler = provider.getSampler();
+  const previousClientConfig = getClientConfig();
+  const previousResolver = getResolver();
+  const added: ISpanProcessor[] = [];
+  const addProcessor = (processor: ISpanProcessor): void => {
+    provider.addSpanProcessor(processor);
+    added.push(processor);
+  };
+
+  try {
+    return await configureProvider(provider, config, addProcessor);
+  } catch (error) {
+    // Only this attempt's processors: others (evaluate()'s cost processor) may have been added
+    // to the provider meanwhile.
+    for (const processor of added) {
+      provider.removeSpanProcessor(processor);
+    }
+    await Promise.all(
+      added.map((processor) => Promise.resolve().then(() => processor.shutdown()).catch(() => undefined)),
+    );
+    provider.setSampler(previousSampler);
+    if (previousClientConfig) {
+      setClientConfig(previousClientConfig.apiKey, previousClientConfig.endpoint);
+    } else {
+      clearClientConfig();
+    }
+    setResolver(previousResolver);
+    throw error;
+  }
+}
+
+async function configureProvider(
+  provider: TracerProvider,
+  config: SDKConfig,
+  addProcessor: (processor: ISpanProcessor) => void,
+): Promise<TracerProvider> {
   const basicProvider = provider.getOtelTracerProvider();
   trace.setGlobalTracerProvider(basicProvider);
 
@@ -270,7 +354,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
 
   // Add processors
   if (config.enableTokenCounting !== false && loadedConfig.instrumentation.enable_token_counting !== false) {
-    provider.addSpanProcessor(new TokenCountingProcessor());
+    addProcessor(new TokenCountingProcessor());
   }
 
   if (config.enableCostTracking !== false && loadedConfig.instrumentation.enable_costs !== false) {
@@ -284,11 +368,11 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
       pricingGeneratedAt,
       pricingSourceRef: getActiveSourceRef(),
     });
-    provider.addSpanProcessor(costProcessor);
+    addProcessor(costProcessor);
     setResolver(new CostResolver(pricing, pricingSource, pricingGeneratedAt));
   }
 
-  provider.addSpanProcessor(
+  addProcessor(
     new AgentEnrichmentProcessor({
       agentConfigPath: agentConfigPath,
       defaultAgentId: getAgentId(),
@@ -299,7 +383,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   );
 
   const guardrailHeuristics = config.guardrailHeuristics ?? loadedConfig.instrumentation.guardrail_heuristics ?? true;
-  provider.addSpanProcessor(new GuardrailDetectorProcessor({ heuristicsEnabled: guardrailHeuristics }));
+  addProcessor(new GuardrailDetectorProcessor({ heuristicsEnabled: guardrailHeuristics }));
 
   const frameworks = config.compliance?.frameworks || [];
   const euRiskTier =
@@ -307,19 +391,19 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
       ? (config.compliance?.risk_tier)
       : undefined;
   const hipaaEnabled = frameworks.includes("hipaa");
-  provider.addSpanProcessor(new GovernanceEnrichmentProcessor({ euRiskTier, hipaaEnabled }));
+  addProcessor(new GovernanceEnrichmentProcessor({ euRiskTier, hipaaEnabled }));
 
   let redactPii = config.redactPii ?? loadedConfig.instrumentation.redact_pii ?? false;
   if (hipaaEnabled && config.redactPii === undefined && loadedConfig.instrumentation.redact_pii === undefined) {
     redactPii = true;
   }
   if (redactPii) {
-    provider.addSpanProcessor(new RedactionSpanProcessor());
+    addProcessor(new RedactionSpanProcessor());
   }
 
   // Log after enrichment and redaction so span logs never contain unredacted values.
   if (config.enableSpanLogging || loadedConfig.logging.enable_span_logging) {
-    provider.addSpanProcessor(new LoggingSpanProcessor());
+    addProcessor(new LoggingSpanProcessor());
   }
 
   // Add batch processor with exporter
@@ -331,7 +415,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     sampler,
   });
 
-  provider.addSpanProcessor(processor);
+  addProcessor(processor);
   registerShutdown(provider, processor);
 
   if (loadedConfig.instrumentation.enable_patching !== false) {
@@ -387,6 +471,12 @@ export function stopTracing(timeoutMs: number = SHUTDOWN_SETTLE_TIMEOUT_MS): Pro
 }
 
 async function stop(state: TracciaRuntime, timeoutMs: number): Promise<void> {
+  // An init() in progress finishes (or rolls back) first, so the stop below sees a whole
+  // provider and its started flag, never a half-configured one. init() calls made while this
+  // stop runs wait for it, so this cannot wait on an init() that started after it.
+  if (state.initializing !== undefined) {
+    await state.initializing.catch(() => undefined);
+  }
   // Read once: state can change while the settles below wait.
   const provider = state.provider;
   try {
