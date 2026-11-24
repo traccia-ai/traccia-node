@@ -76,7 +76,8 @@ export const ENV_VAR_MAPPING: { [key: string]: string[] } = {
   'tracing.endpoint': ['TRACCIA_ENDPOINT', 'AGENT_DASHBOARD_ENDPOINT'],
   'tracing.sample_rate': ['TRACCIA_SAMPLE_RATE', 'AGENT_DASHBOARD_SAMPLE_RATE'],
   'tracing.use_otlp': ['TRACCIA_USE_OTLP'],
-  'tracing.service_name': ['TRACCIA_SERVICE_NAME', 'TRACCIA_AGENT_NAME', 'OTEL_SERVICE_NAME'],
+  // OTEL_SERVICE_NAME, then TRACCIA_AGENT_NAME, then TRACCIA_SERVICE_NAME (the order before TRC-296).
+  'tracing.service_name': ['OTEL_SERVICE_NAME', 'TRACCIA_AGENT_NAME', 'TRACCIA_SERVICE_NAME'],
   'exporters.enable_console': ['TRACCIA_ENABLE_CONSOLE'],
   'exporters.enable_file': ['TRACCIA_ENABLE_FILE'],
   'exporters.file_exporter_path': ['TRACCIA_FILE_PATH'],
@@ -89,7 +90,38 @@ export const ENV_VAR_MAPPING: { [key: string]: string[] } = {
   'metrics.enable_metrics': ['TRACCIA_ENABLE_METRICS'],
   'metrics.metrics_endpoint': ['TRACCIA_METRICS_ENDPOINT'],
   'metrics.metrics_sample_rate': ['TRACCIA_METRICS_SAMPLE_RATE'],
+  'rate_limiting.max_spans_per_second': ['TRACCIA_MAX_SPANS_PER_SECOND'],
+  'rate_limiting.max_block_ms': ['TRACCIA_MAX_BLOCK_MS'],
 };
+
+/** How each environment value is parsed; keys not listed are strings. */
+const ENV_VAR_TYPES: { [key: string]: 'boolean' | 'number' } = {
+  'tracing.sample_rate': 'number',
+  'tracing.use_otlp': 'boolean',
+  'exporters.enable_console': 'boolean',
+  'exporters.enable_file': 'boolean',
+  'instrumentation.enable_token_counting': 'boolean',
+  'instrumentation.enable_costs': 'boolean',
+  'instrumentation.guardrail_heuristics': 'boolean',
+  'instrumentation.redact_pii': 'boolean',
+  'logging.debug': 'boolean',
+  'logging.enable_span_logging': 'boolean',
+  'metrics.enable_metrics': 'boolean',
+  'metrics.metrics_sample_rate': 'number',
+  'rate_limiting.max_spans_per_second': 'number',
+  'rate_limiting.max_block_ms': 'number',
+};
+
+function parseEnvValue(configKey: string, value: string): string | number | boolean {
+  switch (ENV_VAR_TYPES[configKey]) {
+    case 'boolean':
+      return ['true', '1', 'yes'].includes(value.trim().toLowerCase());
+    case 'number':
+      return parseFloat(value);
+    default:
+      return value;
+  }
+}
 
 export function loadConfig(configFile?: string): TracciaConfig {
   const defaultConfig: TracciaConfig = {
@@ -139,39 +171,42 @@ export function loadConfig(configFile?: string): TracciaConfig {
   if (configPath) {
     try {
       const fileContent = fs.readFileSync(configPath, 'utf-8');
-      const parsedToml = toml.parse(fileContent) as Partial<TracciaConfig>;
-      config = {
-        ...defaultConfig,
-        ...parsedToml,
-      };
+      const parsedToml = toml.parse(fileContent) as Record<string, unknown>;
+      // Merge each section onto its defaults, so a section that sets some keys keeps the rest.
+      const merged: Record<string, unknown> = { ...defaultConfig };
+      for (const [section, value] of Object.entries(parsedToml)) {
+        const base = merged[section];
+        merged[section] =
+          isPlainObject(base) && isPlainObject(value) ? { ...base, ...value } : value;
+      }
+      config = merged as unknown as TracciaConfig;
     } catch (error) {
       console.error(`❌ Error reading or parsing config file: ${error}`);
     }
   }
 
-  // Override with environment variables
+  // Override with environment variables. Of a key's aliases, the first one set wins.
   for (const [configKey, envVars] of Object.entries(ENV_VAR_MAPPING)) {
-    for (const envVar of envVars) {
-      if (process.env[envVar]) {
-        const value = process.env[envVar];
-        const keys = configKey.split('.');
-        let current = config as unknown as Record<string, unknown>;
-        for (let i = 0; i < keys.length - 1; i++) {
-          current = current[keys[i]] as Record<string, unknown>;
-        }
-        const lastKey = keys[keys.length - 1];
-        if (typeof current[lastKey] === 'boolean') {
-          current[lastKey] = value === 'true';
-        } else if (typeof current[lastKey] === 'number') {
-          current[lastKey] = parseFloat(value);
-        } else {
-          current[lastKey] = value;
-        }
-      }
+    const envVar = envVars.find((name) => process.env[name]);
+    if (envVar === undefined) {
+      continue;
     }
+    const keys = configKey.split('.');
+    let current = config as unknown as Record<string, unknown>;
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (!isPlainObject(current[keys[i]])) {
+        current[keys[i]] = {};
+      }
+      current = current[keys[i]] as Record<string, unknown>;
+    }
+    current[keys[keys.length - 1]] = parseEnvValue(configKey, process.env[envVar] as string);
   }
 
   return config;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function findConfigFile(): string | undefined {

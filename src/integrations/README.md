@@ -215,7 +215,7 @@ import { startTracing } from '@traccia/sdk';
 
 // In test setup
 startTracing({
-  exporters: [new ConsoleExporter()],  // Avoid network calls
+  exporter: new ConsoleExporter(),     // Avoid network calls
   enableTokenCounting: false,           // Skip token count overhead
 });
 
