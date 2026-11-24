@@ -262,6 +262,22 @@ export function setResolver(resolver: CostResolver): void {
   globalAny[GLOBAL_RESOLVER_KEY] = resolver;
 }
 
+/** The current resolver, or undefined when none exists yet. Unlike getResolver(), never creates one. */
+export function peekResolver(): CostResolver | undefined {
+  const globalAny = globalThis as unknown as Record<symbol, CostResolver | undefined>;
+  return globalAny[GLOBAL_RESOLVER_KEY];
+}
+
+/** Put back a resolver read with peekResolver(); undefined leaves getResolver() to create one lazily again. */
+export function restoreResolver(resolver: CostResolver | undefined): void {
+  const globalAny = globalThis as unknown as Record<symbol, CostResolver | undefined>;
+  if (resolver) {
+    globalAny[GLOBAL_RESOLVER_KEY] = resolver;
+  } else {
+    delete globalAny[GLOBAL_RESOLVER_KEY];
+  }
+}
+
 /**
  * Whether an override can price a call to `model` made through `vendor`. An override that names a
  * provider (_provider/provider) must name the vendor's provider family (with the matcher's
