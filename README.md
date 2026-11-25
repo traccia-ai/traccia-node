@@ -84,6 +84,12 @@ npx tsx index.ts
 
 Each LLM span records the model, tokens, cost, prompt, completion and latency. It prints in your terminal, shows up in your OTLP backend ([Jaeger](https://traccia.ai/docs/guides/local-jaeger/), [Grafana](https://traccia.ai/docs/guides/local-grafana/)), or appears under **Traces** in Traccia like the run above.
 
+### Redact sensitive arguments with `skipArgs`
+
+Pass `skipArgs` to `@observe()` to redact sensitive inputs from span attributes:
+- **Positional arguments:** Pass zero-based string indexes, e.g. `skipArgs: ['1']` redacts the second argument.
+- **Object properties:** Pass property names, e.g. `skipArgs: ['password', 'apiKey']` redacts matching keys in object arguments and nested properties.
+
 ## Evaluate your agent
 
 Run your agent over a small dataset and score every answer. This runs locally, with no Traccia account. Add it to `main()` in `index.ts`, before `stopTracing()`:
