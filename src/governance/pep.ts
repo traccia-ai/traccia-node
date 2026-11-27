@@ -2,6 +2,7 @@
  * SDK policy enforcement point: check() on LLM and tool calls under govern().
  */
 
+import { createHmac } from 'crypto';
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { resolveClientCredentials } from '../config/client-config';
 import { getAgentId, getConfig, pepEnabled } from '../config/runtime-config';
@@ -16,7 +17,19 @@ import {
 } from './evidence';
 import { govConfig } from './config';
 import * as failMode from './fail-mode';
-import { AgentBlockedError, ApprovalPending, GovernanceConfigError, rejectedError } from './policy';
+import { ActiveCall, bindKey, deriveKey, isRunning, KEY_PATTERN, KEY_PREFIX, KeyType, Unkeyable, unkeyableFrom } from './idempotency-key';
+import { isUnconfirmed } from './unconfirmed';
+import { jsonSafe } from '../utils/json-safe';
+import {
+  AgentBlockedError,
+  ApprovalPending,
+  GovernanceConfigError,
+  IDEMPOTENCY_DENY_REASONS,
+  IDEMPOTENCY_IN_FLIGHT,
+  IdempotencyDenyReason,
+  IdempotencyRepeatError,
+  rejectedError,
+} from './policy';
 
 const CHECK_PATH = '/api/v1/policy/check';
 const DECISION_EFFECTS = ['allow', 'warn', 'reshape', 'queue', 'deny'];
@@ -38,6 +51,51 @@ export function _resetPepStateForTests(): void {
   retrievalByTrace.clear();
   promptByTrace.clear();
   httpClient = axios.create({ timeout: 2000 });
+  inFlightNow = () => Date.now();
+  inFlightSleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  inFlightJitter = jitteredDelay;
+}
+
+// A call denied because the same call is in flight waits and checks again: if the first call
+// fails, this one runs instead of being lost; if it succeeds, this one gets the normal repeat.
+// Delays double from 500 ms up to 4 s.
+const IN_FLIGHT_FIRST_DELAY_MS = 500;
+const IN_FLIGHT_MAX_DELAY_MS = 4000;
+let inFlightNow: () => number = () => Date.now();
+let inFlightSleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Each re-check waits a random 50-150% of the step: callers waiting out the same in-flight call would
+// otherwise re-check in lockstep (0.5, 1, 2, 4 s), hitting the server in waves during a burst.
+// Exported for tests.
+export function jitteredDelay(ms: number): number {
+  return ms * (0.5 + Math.random());
+}
+let inFlightJitter: (ms: number) => number = jitteredDelay;
+
+/** Fixed clock and sleep for tests; also turns jitter off so the delays are exact. */
+export function _setInFlightClockForTests(now: () => number, sleep: (ms: number) => Promise<void>): void {
+  inFlightNow = now;
+  inFlightSleep = sleep;
+  inFlightJitter = (ms) => ms;
+}
+
+async function checkWaitingInFlight<T>(check: (recheck: boolean) => Promise<T>, waitMs: number): Promise<T> {
+  const deadline = inFlightNow() + waitMs;
+  let delay = IN_FLIGHT_FIRST_DELAY_MS;
+  let recheck = false;
+  for (;;) {
+    let pause: number;
+    try {
+      return await check(recheck);
+    } catch (error) {
+      const inFlight = error instanceof IdempotencyRepeatError && error.reason === IDEMPOTENCY_IN_FLIGHT;
+      pause = inFlightJitter(delay);
+      if (!inFlight || inFlightNow() + pause > deadline) throw error;
+    }
+    await inFlightSleep(pause);
+    delay = Math.min(delay * 2, IN_FLIGHT_MAX_DELAY_MS);
+    recheck = true;
+  }
 }
 
 /**
@@ -61,13 +119,18 @@ function resourceId(row: unknown): string | undefined {
   return undefined;
 }
 
+/** The agent checks and keys run as: init's or govern()'s agentId, else TRACCIA_AGENT_ID. */
+function resolveAgentId(): string | undefined {
+  return getAgentId() || process.env.TRACCIA_AGENT_ID;
+}
+
 /** Freshness evidence belongs to one tenant, agent and run. */
 function readScope(): { key: string; traceId: string } | undefined {
   const traceId = runKey(getCurrentSpan()?.context?.traceId);
   if (!traceId) {
     return undefined;
   }
-  const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID || '';
+  const agentId = resolveAgentId() || '';
   const tenantId = getConfig().tenantId || '';
   return { key: JSON.stringify([tenantId, agentId, traceId]), traceId };
 }
@@ -307,8 +370,8 @@ export function validDecision(decision: unknown): decision is Record<string, unk
 }
 
 /**
- * No decision from Traccia: apply the fail mode (TRC-342). A rejection of the key
- * after this check was sent wins over any fail mode.
+ * No decision from Traccia: apply the fail mode. A rejection of the key after this check was sent
+ * wins over any fail mode.
  */
 function unresolved(ident: string, startedAt: number, reason: string, detail: string): Record<string, unknown> {
   const rejected = failMode.rejectedSince(ident, startedAt);
@@ -341,7 +404,7 @@ export async function checkPolicy(input: {
       'Traccia API key or endpoint not set. Policy checks need both (TRACCIA_API_KEY and TRACCIA_ENDPOINT, or init()).',
     );
   }
-  const agentId = getAgentId() || process.env.TRACCIA_AGENT_ID;
+  const agentId = resolveAgentId();
   if (!agentId) {
     throw new GovernanceConfigError('No agentId on init, govern(), or TRACCIA_AGENT_ID. Policy checks need one.');
   }
@@ -410,28 +473,24 @@ export async function checkPolicy(input: {
     });
   }
   if (decision.effect === 'deny') {
-    throw new AgentBlockedError(blockedMessage(decision), {
+    const extras = {
       decisionId: decision.id as string | undefined,
       remainingBudgetUsd: decision.remaining_budget_usd as number | null,
       reasons: (decision.reasons as string[]) || [],
-    });
+    };
+    // An idempotency repeat gets its own error, so a compound tool can tell a finished step from
+    // any other block. Only obligations.idempotency_denied says that: `reasons` also holds Observe
+    // policies' reasons, so an idempotency reason there may sit beside another policy's Block.
+    const obligations = (decision.obligations ?? {}) as Record<string, unknown>;
+    const denied = obligations.idempotency_denied;
+    if ((IDEMPOTENCY_DENY_REASONS as readonly unknown[]).includes(denied)) {
+      throw new IdempotencyRepeatError(blockedMessage(decision), { ...extras, reason: denied as IdempotencyDenyReason });
+    }
+    throw new AgentBlockedError(blockedMessage(decision), extras);
   }
   return decision;
 }
 
-/**
- * How a governed call ended, for settling its reservation. When `actualUsd` is missing, the
- * server prices the call from `model`, `vendor` and the token counts; with none of them it
- * releases the reservation.
- */
-export interface SettleOptions {
-  release?: boolean;
-  actualUsd?: number;
-  model?: string;
-  vendor?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-}
 
 /**
  * The credentials and agent each policy decision was checked with (see checkPolicy), so
@@ -447,43 +506,133 @@ export function reservedUsd(decision: Record<string, unknown> | undefined): numb
   return typeof reserved === 'number' ? reserved : undefined;
 }
 
+export const SETTLE_FAILED_ATTRIBUTE = 'traccia.idempotency.settle_failed';
+export const DOWNSTREAM_KEY_ATTRIBUTE = 'traccia.idempotency.downstream_key';
+
+/** How a tool call's idempotency reservation is settled. */
+export const OUTCOME_COMMIT = 'commit';
+export const OUTCOME_RELEASE = 'release';
+export const OUTCOME_UNCONFIRMED = 'unconfirmed';
+export const OUTCOME_ABANDON = 'abandon';
+export const OUTCOMES = [OUTCOME_COMMIT, OUTCOME_RELEASE, OUTCOME_UNCONFIRMED, OUTCOME_ABANDON] as const;
+export type IdempotencyOutcome = (typeof OUTCOMES)[number];
+
+function stampSettleFailed(): void {
+  getCurrentSpan()?.setAttribute(SETTLE_FAILED_ATTRIBUTE, true);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** A settle the server answered but did not apply: a 4xx, or a 2xx whose JSON body has `ok: false`. */
+function settleLost(status: number | undefined, data: unknown): boolean {
+  if (status !== undefined && status >= 400 && status < 500) {
+    return true;
+  }
+  return isRecord(data) && data.ok === false; // a body that is not JSON counts as applied
+}
+
+/**
+ * How a governed call ended, for settling its reservation. When `actualUsd` is missing, the
+ * server prices the call from `model`, `vendor` and the token counts; with none of them it
+ * releases the reservation.
+ *
+ * How to settle: an LLM or budget settle passes `release`; a tool call passes its `outcome`,
+ * from which the wire `release` is derived (true for anything but commit).
+ */
+export type SettleOptions = {
+  actualUsd?: number;
+  model?: string;
+  vendor?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+} & (
+  | { release?: boolean; outcome?: undefined }
+  | { outcome: IdempotencyOutcome; release?: undefined }
+);
+
+/**
+ * Settle the call's reservation: the USD reserved for an LLM call and/or the idempotency key
+ * reserved for a tool call. `unconfirmed` holds the key (the call may have happened); `abandon`
+ * frees the reservation but keeps its downstream key.
+ */
 export async function settlePolicy(
   decision: Record<string, unknown> | undefined,
   opts: SettleOptions = {},
 ): Promise<void> {
-  const reserved = (decision?.obligations as Record<string, unknown> | undefined)?.reserved_usd;
-  if (reserved == null) {
+  const obligations = decision?.obligations as Record<string, unknown> | undefined;
+  const reserved = obligations?.reserved_usd;
+  const idempotency = isRecord(obligations?.idempotency) ? obligations.idempotency : undefined;
+  if (reserved == null && !idempotency) {
     return;
   }
   // The reservation belongs to the account and agent its check used, so settle there. This
   // also keeps a settle that starts after stopTracing() cleared the init() credentials working.
   const bound = decision ? checkCredentials.get(decision) : undefined;
   const { apiKey, endpoint } = bound ?? resolveClientCredentials();
-  const agentId = bound?.agentId || getAgentId() || process.env.TRACCIA_AGENT_ID;
+  const agentId = bound?.agentId || resolveAgentId();
   if (!apiKey || !endpoint || !agentId) {
+    if (idempotency) {
+      stampSettleFailed();
+    }
     return;
   }
+  const outcome: IdempotencyOutcome = opts.outcome ?? (opts.release ? OUTCOME_RELEASE : OUTCOME_COMMIT);
   const span = getCurrentSpan();
-  try {
-    const base = deriveBaseUrl(endpoint);
-    await httpClient.post(
-      `${base}${SETTLE_PATH}`,
-      {
-        agent_id: agentId,
-        trace_id: asOtelHex(span?.context?.traceId, 32),
-        reserved_usd: reserved,
-        actual_usd: opts.actualUsd,
-        release: Boolean(opts.release),
-        model: opts.model,
-        vendor: opts.vendor,
-        input_tokens: opts.inputTokens,
-        output_tokens: opts.outputTokens,
-      },
-      { headers: { Authorization: `Bearer ${apiKey}` } },
-    );
-  } catch {
-    // settle is best-effort
+  const body: Record<string, unknown> = {
+    agent_id: agentId,
+    trace_id: asOtelHex(span?.context?.traceId, 32),
+    reserved_usd: reserved,
+    actual_usd: opts.actualUsd,
+    release: outcome !== OUTCOME_COMMIT,
+    model: opts.model,
+    vendor: opts.vendor,
+    input_tokens: opts.inputTokens,
+    output_tokens: opts.outputTokens,
+  };
+  const headers = { Authorization: `Bearer ${apiKey}` };
+  if (!idempotency) {
+    try {
+      const base = deriveBaseUrl(endpoint);
+      await httpClient.post(`${base}${SETTLE_PATH}`, body, { headers });
+    } catch {
+      // settle is best-effort
+    }
+    return;
   }
+  // An exception or a 5xx is tried once more; a 4xx or {"ok": false} is lost, as a retry would
+  // not help. Either way the failure is stamped on the span and swallowed.
+  if (reserved == null) {
+    delete body.reserved_usd;
+  }
+  body.idempotency = { ...idempotency, outcome };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let status: number | undefined;
+    let data: unknown;
+    try {
+      const base = deriveBaseUrl(endpoint);
+      const response = await httpClient.post(`${base}${SETTLE_PATH}`, body, { headers });
+      status = response?.status;
+      data = response?.data;
+    } catch (error) {
+      status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      data = axios.isAxiosError(error) ? error.response?.data : undefined;
+      if (status === undefined) {
+        continue; // no answer: try again
+      }
+    }
+    if (status !== undefined && status >= 500) {
+      continue;
+    }
+    if (settleLost(status, data)) {
+      console.warn(`[traccia.governance] idempotency settle was not applied (HTTP ${status})`);
+      stampSettleFailed();
+    }
+    return;
+  }
+  console.warn('[traccia.governance] idempotency settle failed after two attempts');
+  stampSettleFailed();
 }
 
 /**
@@ -741,14 +890,32 @@ export async function drainOpenCalls(timeoutMs = SHUTDOWN_SETTLE_TIMEOUT_MS): Pr
   }
 }
 
+/**
+ * What a tool check says about idempotency: the call key (with the key the tool falls back on when
+ * a check gets no answer, and whether this re-checks a call that was in flight), or why the call
+ * has none.
+ */
+type ToolCheckIdempotency = { unkeyable: string } | { key: string; fallbackKey?: string; recheck?: boolean };
+
+function idempotencyWire(idempotency: ToolCheckIdempotency): Record<string, unknown> {
+  if ('unkeyable' in idempotency) return { unkeyable: idempotency.unkeyable };
+  const wire: Record<string, unknown> = { key: idempotency.key };
+  if (idempotency.fallbackKey !== undefined) wire.fallback_key = idempotency.fallbackKey;
+  if (idempotency.recheck) wire.recheck = true;
+  return wire;
+}
+
+/** Check a tool call. `idempotency` marks it idempotent; `scope` 'workspace' shares its key across agents. */
 export async function enforceToolCall(
   name: string,
   args: Record<string, unknown> = {},
+  idempotency?: ToolCheckIdempotency,
+  scope?: 'agent' | 'workspace',
 ): Promise<Record<string, unknown> | undefined> {
   if (!pepEnabled()) {
     return undefined;
   }
-  const context: Record<string, unknown> = { input: args, tool_name: name };
+  const context: Record<string, unknown> = { input: jsonSafe(args), tool_name: name };
   const freshness = freshnessContext(resourceId(args));
   if (freshness.length) {
     context.freshness = freshness;
@@ -757,8 +924,185 @@ export async function enforceToolCall(
   if (id) {
     context.customer_id = id;
   }
-  return checkPolicy({
-    action: { type: 'tool_call', name },
-    context,
-  });
+  const action: Record<string, unknown> = { type: 'tool_call', name };
+  if (idempotency !== undefined) {
+    action.idempotent = true;
+    context.idempotency = idempotencyWire(idempotency);
+    if (scope === 'workspace') action.idempotency_scope = 'workspace';
+  }
+  return checkPolicy({ action, context });
+}
+
+/** An idempotent tool's settings, resolved once when the tool is wrapped (see `observe`). */
+export interface IdempotencyConfig {
+  keyFields?: string[];
+  keyTypes?: Record<string, KeyType>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  keyExtra?: (this: any, ...args: any[]) => unknown;
+  unconfirmedOn?: (error: unknown) => boolean;
+  releaseOn?: (error: unknown) => boolean;
+  releaseUnconfirmed: boolean;
+  scope: 'agent' | 'workspace';
+  inFlightWaitMs: number;
+}
+
+/** One call of an idempotent tool. */
+export interface IdempotentToolCall {
+  config: IdempotencyConfig;
+  /** The arguments the key is derived from, key types already applied; an `Unkeyable` when there are none. */
+  keyArguments: Record<string, unknown> | Unkeyable;
+  /** `config.keyExtra` bound to this call's `this` and arguments. */
+  extra?: () => unknown;
+}
+
+/** The key for this call, or why it has none. Only the reason, never an error message, goes on the wire. */
+function keyFor(name: string, call: IdempotentToolCall): string | Unkeyable {
+  const material = call.keyArguments;
+  if (material instanceof Unkeyable) {
+    return material;
+  }
+  let extra: unknown;
+  if (call.extra) {
+    try {
+      extra = call.extra();
+    } catch (error) {
+      return unkeyableFrom(error, 'computing keyExtra');
+    }
+  }
+  try {
+    // A workspace-scoped key leaves the agent out, so every agent derives the same one.
+    const agent = call.config.scope === 'workspace' ? undefined : resolveAgentId();
+    return deriveKey(agent, name, material, call.config.keyFields, extra);
+  } catch (error) {
+    // e.g. a throwing getter
+    return error instanceof Unkeyable ? error : unkeyableFrom(error, 'keying arguments');
+  }
+}
+
+/**
+ * The downstream key, which `idempotencyKey()` returns: the per-attempt key the check handed back
+ * (new for each new action, the same for a retry of an attempt that may have happened). Without
+ * one (checks off, Traccia unreachable, an older dashboard), `offline`: the call's
+ * offlineDownstreamKey, which its check sent as the fallback key. Stamped on the span; the call
+ * key never is.
+ */
+function resolveDownstreamKey(decision: Record<string, unknown> | undefined, offline: string): string {
+  const obligations = decision?.obligations as Record<string, unknown> | undefined;
+  const fromCheck = obligations?.idempotency_downstream_key;
+  const key = typeof fromCheck === 'string' && KEY_PATTERN.test(fromCheck) ? fromCheck : offline;
+  getCurrentSpan()?.setAttribute(DOWNSTREAM_KEY_ATTRIBUTE, key);
+  return key;
+}
+
+/**
+ * `idk1_` + HMAC-SHA256(API key, call key), so whoever receives it cannot reverse it by guessing the
+ * arguments, as in the Python SDK; the call key itself when no API key is set.
+ */
+function offlineDownstreamKey(callKey: string): string {
+  let apiKey: string | undefined;
+  try {
+    apiKey = resolveClientCredentials().apiKey;
+  } catch {
+    apiKey = undefined;
+  }
+  if (!apiKey) return callKey;
+  return KEY_PREFIX + createHmac('sha256', apiKey).update(callKey, 'utf8').digest('hex');
+}
+
+/** Settle a tool call; a settle error never replaces the tool's result or error. */
+async function settleQuietly(decision: Record<string, unknown> | undefined, outcome: IdempotencyOutcome): Promise<void> {
+  if (!decision) {
+    return;
+  }
+  try {
+    await settlePolicy(decision, { outcome });
+  } catch {
+    // swallowed: the tool's own outcome wins
+  }
+}
+
+/**
+ * How a tool call that threw settles. A failure the tool says is definite (`DefiniteFailure` or
+ * `releaseOn`; see `isUnconfirmed`) releases the key.
+ * Any other error may have happened: it is held as unconfirmed, so a retry inside the window is not
+ * run blind, or with releaseUnconfirmed abandoned, so the retry runs with the same downstream key.
+ * Classifying never costs the settle: a throwing hook, or a throwing getter on the error, counts
+ * as "may have happened".
+ */
+function failureOutcome(error: unknown, config: IdempotencyConfig | undefined): IdempotencyOutcome {
+  let maybeDone: boolean;
+  try {
+    maybeDone = isUnconfirmed(error, config?.unconfirmedOn, config?.releaseOn);
+  } catch {
+    maybeDone = true;
+  }
+  if (!maybeDone) return OUTCOME_RELEASE;
+  return config?.releaseUnconfirmed ? OUTCOME_ABANDON : OUTCOME_UNCONFIRMED;
+}
+
+/**
+ * Check a tool call, run it, then settle what the check reserved.
+ *
+ * With `idempotency` the key is derived and bound for `idempotencyKey()` even when policy checks
+ * are off or could not reach Traccia. The key is committed when `run` resolves. When it throws or
+ * rejects, the key is released, or held as unconfirmed if the call may still have happened (see
+ * `isUnconfirmed`); the original error is rethrown. The settle is awaited before this resolves or
+ * rejects, so an immediate retry is never seen as in flight.
+ */
+export async function governedToolCall<T>(
+  name: string,
+  args: Record<string, unknown>,
+  idempotency: IdempotentToolCall | undefined,
+  run: () => T | PromiseLike<T>,
+): Promise<T> {
+  let decision: Record<string, unknown> | undefined;
+  let callKey: string | undefined;
+  let downstreamKey: string | undefined;
+  let unkeyable: Unkeyable | undefined;
+  if (!idempotency) {
+    decision = await enforceToolCall(name, args);
+  } else {
+    const { config } = idempotency;
+    const keyed = keyFor(name, idempotency);
+    if (keyed instanceof Unkeyable) {
+      unkeyable = keyed;
+      decision = await enforceToolCall(name, args, { unkeyable: keyed.message }, config.scope);
+    } else {
+      const key = keyed;
+      callKey = key;
+      // The tool called itself with the same arguments: checked without waiting out its own
+      // in-flight reservation, so a Block policy denies it at once and anything else lets it run.
+      const reentrant = isRunning(key);
+      // What the tool passes downstream if a check gets no answer; a fresh attempt adopts it, so a
+      // retry after a lost answer passes the same key.
+      const offline = offlineDownstreamKey(key);
+      const check: { key: string; fallbackKey?: string } = offline === key ? { key } : { key, fallbackKey: offline };
+      decision = await checkWaitingInFlight(
+        // A check made while waiting out an in-flight call is flagged, so the server neither counts it
+        // as another tool call nor stores or alerts on it while it is still in flight.
+        (recheck) => enforceToolCall(name, args, recheck ? { ...check, recheck: true } : check, config.scope),
+        reentrant ? 0 : config.inFlightWaitMs,
+      );
+      downstreamKey = resolveDownstreamKey(decision, offline);
+    }
+  }
+  const bindValue = downstreamKey ?? unkeyable;
+  let result: T;
+  try {
+    if (bindValue === undefined) {
+      result = await run();
+    } else {
+      const call: ActiveCall | undefined = callKey === undefined ? undefined : { key: callKey, running: true };
+      try {
+        result = await bindKey(bindValue, run, call);
+      } finally {
+        if (call) call.running = false;
+      }
+    }
+  } catch (error) {
+    await settleQuietly(decision, failureOutcome(error, idempotency?.config));
+    throw error;
+  }
+  await settleQuietly(decision, OUTCOME_COMMIT);
+  return result;
 }
