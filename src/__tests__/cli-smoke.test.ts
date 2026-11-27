@@ -26,6 +26,13 @@ describe('published CLI', () => {
     expect(result.stdout).toContain('--output');
   });
 
+  test('--version prints the package version', () => {
+    const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
+    const result = run(['--version']);
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(version);
+  });
+
   test('an unknown flag exits 2 and writes a summary', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'traccia-cli-'));
     const output = path.join(dir, 'summary.json');
