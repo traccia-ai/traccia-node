@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
 import axios from 'axios';
+import { version as tracciaVersion } from '../package.json';
 import {
   loadConfig,
   findConfigFile,
@@ -66,7 +67,7 @@ program.exitOverride();
 program
   .name('traccia-ts')
   .description('Traccia SDK - Production-ready tracing for AI agents')
-  .version('0.0.1');
+  .version(tracciaVersion);
 
 program
   .command('check')
