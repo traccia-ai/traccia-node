@@ -5,6 +5,7 @@
 import { TracerProvider } from './tracer/provider';
 import { trace } from '@opentelemetry/api';
 import { BatchSpanProcessor } from './processor/batch-processor';
+import { RateLimitingSpanProcessor } from './processor/rate-limiter';
 import { Sampler } from './processor/sampler';
 import { TokenCountingProcessor } from './processor/token-counter';
 import { CostAnnotatingProcessor } from './processor/cost-processor';
@@ -36,7 +37,8 @@ import {
   getEnv as getRuntimeEnv,
 } from './config/runtime-config';
 import { CostResolver, setResolver } from './processor/cost-resolver';
-import { SDKConfig, ISpanExporter, ITracer } from './types';
+import { SDKConfig, ISpanExporter, ISpanProcessor, ITracer } from './types';
+import { ConfigError } from './errors';
 import { configureGovernance } from './governance/config';
 import { drainOpenCalls, settleOpenCalls, SHUTDOWN_SETTLE_TIMEOUT_MS } from './governance/pep';
 import { configurePrompts } from './prompts';
@@ -110,7 +112,73 @@ function applyGovernanceConfig(config: SDKConfig): void {
   });
 }
 
+/** Every init() option; typed so a key added to SDKConfig must be added here. */
+const SDK_CONFIG_KEYS: Record<keyof SDKConfig, true> = {
+  apiKey: true,
+  endpoint: true,
+  sampleRate: true,
+  maxQueueSize: true,
+  maxExportBatchSize: true,
+  scheduleDelayMs: true,
+  maxSpansPerSecond: true,
+  maxBlockMs: true,
+  enableConsoleExporter: true,
+  enableFileExporter: true,
+  fileExporterPath: true,
+  resetTraceFile: true,
+  useOtlp: true,
+  enableTokenCounting: true,
+  enableCostTracking: true,
+  enableSpanLogging: true,
+  guardrailHeuristics: true,
+  redactPii: true,
+  pricingOverride: true,
+  sessionId: true,
+  userId: true,
+  tenantId: true,
+  projectId: true,
+  debug: true,
+  attrTruncationLimit: true,
+  loadEnv: true,
+  autoInstrument: true,
+  toolInclude: true,
+  maxToolSpans: true,
+  maxSpanDepth: true,
+  resource: true,
+  exporter: true,
+  compliance: true,
+  enableMetrics: true,
+  metricsEndpoint: true,
+  metricsSampleRate: true,
+  serviceRole: true,
+  statusCheckEndpoint: true,
+  postBlockEndpoint: true,
+  statusCacheTtlSeconds: true,
+  policyFailMode: true,
+  promptCacheTtlS: true,
+  promptApiBase: true,
+  agentId: true,
+  agentName: true,
+  env: true,
+};
+
+/** Reject options init() does not know (a typo or snake_case name would otherwise be ignored). */
+function rejectUnknownOptions(config: SDKConfig): void {
+  const unknown = Object.keys(config).filter(
+    (key) =>
+      !Object.prototype.hasOwnProperty.call(SDK_CONFIG_KEYS, key) &&
+      (config as Record<string, unknown>)[key] !== undefined,
+  );
+  if (unknown.length > 0) {
+    throw new ConfigError(
+      `init() got unsupported option(s): ${unknown.join(', ')}. Options are camelCase, e.g. sampleRate.`,
+      { unsupportedOptions: unknown },
+    );
+  }
+}
+
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
+  rejectUnknownOptions(config);
   if (runtimeState().started) {
     // Tracing stays as it is, but policy checks start afresh (TRC-342): no
     // remembered fail mode, and this call's policyFailMode applies.
@@ -256,24 +324,25 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     });
   }
 
-  if (config.enableConsoleExporter || loadedConfig.exporters.enable_console) {
+  // Each option: explicit argument, else environment/config file (loadConfig), else default.
+  if (config.enableConsoleExporter ?? loadedConfig.exporters.enable_console ?? false) {
     const consoleExporter = new ConsoleExporter();
     exporter = new CompositeExporter([exporter, consoleExporter]);
   }
 
-  if (config.enableFileExporter || loadedConfig.exporters.enable_file) {
+  if (config.enableFileExporter ?? loadedConfig.exporters.enable_file ?? false) {
     const filePath = config.fileExporterPath || loadedConfig.exporters.file_exporter_path || 'traces.jsonl';
-    const resetOnStart = config.resetTraceFile || loadedConfig.exporters.reset_trace_file || false;
+    const resetOnStart = config.resetTraceFile ?? loadedConfig.exporters.reset_trace_file ?? false;
     const fileExporter = new FileExporter({ filePath, resetOnStart });
     exporter = new CompositeExporter([exporter, fileExporter]);
   }
 
   // Add processors
-  if (config.enableTokenCounting !== false && loadedConfig.instrumentation.enable_token_counting !== false) {
+  if (config.enableTokenCounting ?? loadedConfig.instrumentation.enable_token_counting ?? true) {
     provider.addSpanProcessor(new TokenCountingProcessor());
   }
 
-  if (config.enableCostTracking !== false && loadedConfig.instrumentation.enable_costs !== false) {
+  if (config.enableCostTracking ?? loadedConfig.instrumentation.enable_costs ?? true) {
     const pricingTable = config.pricingOverride
       ? (config.pricingOverride as Record<string, { inputCost: number; outputCost: number }>)
       : undefined;
@@ -318,7 +387,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   }
 
   // Log after enrichment and redaction so span logs never contain unredacted values.
-  if (config.enableSpanLogging || loadedConfig.logging.enable_span_logging) {
+  if (config.enableSpanLogging ?? loadedConfig.logging.enable_span_logging ?? false) {
     provider.addSpanProcessor(new LoggingSpanProcessor());
   }
 
@@ -331,7 +400,20 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
     sampler,
   });
 
-  provider.addSpanProcessor(processor);
+  // A rate limit, when set, drops spans over it before they reach the batch processor.
+  const maxSpansPerSecond =
+    config.maxSpansPerSecond ?? loadedConfig.rate_limiting.max_spans_per_second;
+  const maxBlockMs = config.maxBlockMs ?? loadedConfig.rate_limiting.max_block_ms ?? 100;
+  let exportProcessor: ISpanProcessor = processor;
+  if (maxSpansPerSecond !== undefined && maxSpansPerSecond > 0) {
+    exportProcessor = new RateLimitingSpanProcessor({
+      maxSpansPerSecond,
+      maxBlockMs: Number.isFinite(maxBlockMs) ? maxBlockMs : 100,
+      nextProcessor: processor,
+    });
+  }
+
+  provider.addSpanProcessor(exportProcessor);
   registerShutdown(provider, processor);
 
   if (loadedConfig.instrumentation.enable_patching !== false) {

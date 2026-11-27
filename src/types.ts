@@ -121,6 +121,10 @@ export interface SDKConfig {
   maxQueueSize?: number;
   maxExportBatchSize?: number;
   scheduleDelayMs?: number;
+  /** Rate limit on exported spans; spans over it are dropped. Unset or 0: no limit. Also `TRACCIA_MAX_SPANS_PER_SECOND`. */
+  maxSpansPerSecond?: number;
+  /** How long a span over the rate limit waits for capacity before it is dropped (default 100). Also `TRACCIA_MAX_BLOCK_MS`. */
+  maxBlockMs?: number;
   enableConsoleExporter?: boolean;
   enableFileExporter?: boolean;
   fileExporterPath?: string;
