@@ -57,6 +57,8 @@ export interface TracciaRuntime {
   stopping?: Promise<void>;
   /** Each provider's shutdown, so stopTracing() and the signal hook shut it down once. */
   providerShutdowns?: WeakMap<TracerProvider, Promise<void>>;
+  /** Exit and signal hooks are installed (once per process, across bundles). */
+  exitHooksInstalled?: boolean;
 }
 
 /** One process shares this object across the CLI bundle and the public SDK. */
@@ -111,6 +113,12 @@ function applyGovernanceConfig(config: SDKConfig): void {
 }
 
 export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
+  // A stopTracing() still running would otherwise leave started=true and hand back the
+  // provider it is shutting down.
+  const stopping = runtimeState().stopping;
+  if (stopping != null) {
+    await stopping.catch(() => undefined);
+  }
   if (runtimeState().started) {
     // Tracing stays as it is, but policy checks start afresh (TRC-342): no
     // remembered fail mode, and this call's policyFailMode applies.
@@ -332,7 +340,7 @@ export async function init(config: SDKConfig = {}): Promise<TracerProvider> {
   });
 
   provider.addSpanProcessor(processor);
-  registerShutdown(provider, processor);
+  installExitHooks();
 
   if (loadedConfig.instrumentation.enable_patching !== false) {
     try {
@@ -398,8 +406,10 @@ async function stop(state: TracciaRuntime, timeoutMs: number): Promise<void> {
     // governance settles reach the server first.
     await settleOpenCalls(timeoutMs).catch(() => undefined);
     await shutdownProvider(provider);
+    // Tracing is stopped even if a provider was swapped in meanwhile (setTracerProvider()), so
+    // the next init() starts afresh; that provider itself stays in place.
+    state.started = false;
     if (state.provider === provider) {
-      state.started = false;
       state.provider = null;
       state.costProvider = null;
     }
@@ -427,56 +437,161 @@ function shutdownProvider(provider: TracerProvider): Promise<void> {
 }
 
 /**
- * Register shutdown hooks.
+ * Install the process hooks that flush spans when the app did not call stopTracing():
+ * - beforeExit: the event loop ran out of work (a script or job finishing normally). The batch
+ *   timer is unref'ed, so without this the queued spans are dropped. beforeExit fires again
+ *   once the export's I/O finishes; by then the provider is gone, so the hook does nothing.
+ *   An export that cannot finish (an unreachable endpoint being retried) keeps the process
+ *   alive, so after EXIT_FLUSH_TIMEOUT_MS the process exits with the app's process.exitCode.
+ * - SIGINT/SIGTERM: flush (up to the same deadline), then terminate (see terminateAfterSignal).
+ * Each hook acts on the provider current at that moment, not the one from the first init().
+ * Not covered: process.exit() and frozen serverless runtimes, which skip beforeExit; those
+ * apps must await stopTracing() themselves.
  */
-function registerShutdown(provider: TracerProvider, _processor: BatchSpanProcessor): void {
-  if (_registeredShutdown) {
+function installExitHooks(): void {
+  const state = runtimeState();
+  if (state.exitHooksInstalled) {
     return;
   }
+  state.exitHooksInstalled = true;
 
-  let signalled: Promise<void> | undefined;
+  // The provider the beforeExit hook last flushed: a failed shutdown leaves it in place, and
+  // beforeExit fires again once that shutdown's I/O ends, so without this it would retry in a loop.
+  let exitFlushed: TracerProvider | undefined;
+  let exitTimer: NodeJS.Timeout | undefined;
+  process.on('beforeExit', () => {
+    const provider = runtimeState().provider;
+    if (!provider || provider === exitFlushed) {
+      return;
+    }
+    exitFlushed = provider;
+    const stopped = stopTracing().catch(() => undefined);
+    if (exitTimer !== undefined) {
+      return;
+    }
+    // Unreferenced: it never keeps the process alive by itself, but still fires while a stuck
+    // export does. process.exit() with no code exits with process.exitCode, as a natural exit would.
+    exitTimer = setTimeout(() => process.exit(), EXIT_FLUSH_TIMEOUT_MS);
+    exitTimer.unref();
+    void stopped.then(() => {
+      clearTimeout(exitTimer);
+      exitTimer = undefined;
+    });
+  });
+
+  // For a signal the app owns: the app keeps running (often draining its own work), so calls in
+  // flight are let finish rather than stopped, and tracing state is left as it is.
   const drainAndShutdown = async (): Promise<void> => {
     const state = runtimeState();
     try {
       if (state.stopping !== undefined) {
-        // A stopTracing() in progress settles the calls and shuts the provider down.
         await state.stopping;
         return;
       }
-      // The provider in use now (stopTracing() and a later init() replace the first one), read
-      // before the wait below.
-      const current = state.provider ?? provider;
-      // This listener replaces Node's default exit, so the app keeps running (often draining
-      // its own work): let calls in flight finish rather than stop them, within the time limit.
+      const current = state.provider;
+      if (!current) {
+        return;
+      }
       await drainOpenCalls();
       await shutdownProvider(current);
     } catch {
       // Silently fail
     }
   };
-  // SIGTERM then SIGINT (or a repeated signal) share one shutdown.
-  const shutdown = (): Promise<void> => {
-    if (signalled === undefined) {
-      signalled = drainAndShutdown().finally(() => {
-        signalled = undefined;
-      });
-    }
-    return signalled;
-  };
 
+  // The flush the first signal started; later signals (a second Ctrl+C, SIGTERM then SIGINT)
+  // share it rather than start another.
+  let signalled: Promise<void> | undefined;
+  // Signals the app has handled. Ownership is sticky: a process.once() handler is gone by the
+  // next delivery while its drain may still be running, so a later signal must not be read as
+  // "nobody handles this" and kill the process under the app.
+  const appOwned = new Set<NodeJS.Signals>();
+  const onSignal = (signal: NodeJS.Signals): Promise<void> => {
+    // Decide now whether the app owns termination. A process.once() handler removes itself as
+    // this signal is delivered, so checking after the flush would find it gone. The SDK's
+    // listener is prepended, so it runs before the app's listeners and still sees them here.
+    if (hasAppSignalListener(signal, onSignal)) {
+      appOwned.add(signal);
+    }
+    const appHandles = appOwned.has(signal);
+    if (signalled !== undefined) {
+      // A second signal while the flush still runs (a slow or hung exporter): stop waiting,
+      // unless the app owns the signal and decides itself.
+      terminateAfterSignal(signal, onSignal, appHandles);
+      return signalled;
+    }
+    let flush: Promise<void>;
+    let timer: NodeJS.Timeout | undefined;
+    if (appHandles) {
+      // The app keeps running, so its calls in flight are let finish (drainOpenCalls() has its
+      // own time limit) and the SDK does not hurry it.
+      flush = drainAndShutdown();
+    } else {
+      // The SDK terminates the process afterwards, so stop tracing outright and bound the wait:
+      // a hung export must not keep a signalled process alive. The timer stays referenced so
+      // it fires even with no other work.
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, EXIT_FLUSH_TIMEOUT_MS);
+      });
+      flush = Promise.race<void>([stopTracing().catch(() => undefined), deadline]);
+    }
+    const current: Promise<void> = flush.then(() => {
+      clearTimeout(timer);
+      if (signalled === current) {
+        signalled = undefined;
+      }
+      terminateAfterSignal(signal, onSignal, appHandles);
+    });
+    signalled = current;
+    return current;
+  };
+  // Prepended so the SDK sees the app's handlers (including one-shot ones) before they run.
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
-  process.on('SIGTERM', shutdown);
+  process.prependListener('SIGINT', onSignal);
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
-  process.on('SIGINT', shutdown);
-  _registeredShutdown = true;
+  process.prependListener('SIGTERM', onSignal);
+}
+
+/**
+ * How long an exiting process (natural exit or SIGINT/SIGTERM) waits for spans to export
+ * before it ends anyway. A reachable collector takes well under a second; an unreachable one
+ * would otherwise hold the process for the exporter's full retry schedule (10-17 s).
+ */
+const EXIT_FLUSH_TIMEOUT_MS = 5000;
+
+/**
+ * Called once a SIGINT/SIGTERM-triggered flush has finished. `listener` is the SDK's own
+ * handler for that signal. Registering any listener replaces Node's default action for a
+ * signal (terminate), so unless something restores it the process keeps running.
+ *
+ * If the app had its own handler for the signal when it arrived (a server draining connections,
+ * the CLI's eval interrupt, including a one-shot process.once() handler), it owns termination,
+ * for that and every later delivery of the signal, and the SDK leaves it alone. Otherwise the
+ * SDK removes its listener and re-raises the signal, so Node's default applies and the process dies *by the
+ * signal* (what shells, systemd and Kubernetes expect), not with an invented exit code.
+ */
+function terminateAfterSignal(
+  signal: NodeJS.Signals,
+  listener: (signal: NodeJS.Signals) => unknown,
+  appHandles: boolean,
+): void {
+  // Also check now, for a handler the app added while the SDK was flushing.
+  if (appHandles || hasAppSignalListener(signal, listener)) {
+    return;
+  }
+  process.removeListener(signal, listener);
+  process.kill(process.pid, signal);
+}
+
+/** Whether anything besides the SDK's own `listener` is listening for `signal`. */
+function hasAppSignalListener(signal: NodeJS.Signals, listener: (signal: NodeJS.Signals) => unknown): boolean {
+  return process.listeners(signal).some((l) => l !== listener);
 }
 
 /**
  * Alias for backwards compatibility.
  */
 export const startTracing = init;
-
-let _registeredShutdown = false;
 
 /**
  * Composite exporter combining multiple exporters.

@@ -36,7 +36,10 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     shutdown: async () => undefined,
   };
   let post: jest.Mock;
-  let hook: () => Promise<void>;
+  let hook: (signal: NodeJS.Signals) => Promise<void>;
+  // The app's own SIGTERM handler: with one, the app owns termination and the hook never
+  // re-raises the signal (which would end this test process).
+  const appHandler = (): void => undefined;
   /** The AbortSignal of each Groq request. */
   const signals: AbortSignal[] = [];
   /** Sends the rest of the open stream. */
@@ -48,13 +51,14 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     exported.filter((s) => s.name === 'llm.groq.chat.completions').map((s) => s.attributes);
 
   beforeAll(async () => {
+    process.on('SIGTERM', appHandler);
     const before = process.listeners('SIGTERM');
     post = jest.fn();
     _setPepHttpClientForTests({ post } as unknown as AxiosInstance);
     await init({ apiKey: 'tr_test_key', endpoint: 'http://127.0.0.1:9/v1/traces', agentId: 'agent-1', loadEnv: false, exporter });
     const added = process.listeners('SIGTERM').filter((l) => !before.includes(l));
     expect(added).toHaveLength(1);
-    hook = added[0] as () => Promise<void>;
+    hook = added[0] as (signal: NodeJS.Signals) => Promise<void>;
     expect(process.listeners('SIGINT')).toContain(hook);
     await stopTracing();
   });
@@ -88,6 +92,10 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     client = new Groq({ apiKey: 'test', fetch: fetch as never, maxRetries: 0 });
   });
 
+  afterAll(() => {
+    process.removeListener('SIGTERM', appHandler);
+  });
+
   afterEach(async () => {
     // The hook shut the provider down but left the runtime started; reset it for the next init().
     await stopTracing();
@@ -118,7 +126,7 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     const appDrain = jest.fn();
     process.once('SIGTERM', appDrain);
     try {
-      const hooked = hook();
+      const hooked = hook('SIGTERM');
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(signals[0].aborted).toBe(false);
       expect(settles()).toHaveLength(0);
@@ -144,7 +152,7 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     'settles a stream still open at the time limit at its reservation, without stopping it',
     async () => {
       const it = await openStream();
-      await hook();
+      await hook('SIGTERM');
 
       expect(signals[0].aborted).toBe(false);
       expect(settles()).toEqual([expect.objectContaining({ actual_usd: 0.5, reserved_usd: 0.5, release: false })]);
@@ -168,7 +176,7 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     const shutdown = jest.spyOn(getTracerProvider(), 'shutdown');
 
     const stopping = stopTracing();
-    await hook();
+    await hook('SIGTERM');
     await stopping;
 
     // stopTracing() stops the governed stream and settles it; the hook adds nothing.
@@ -181,7 +189,7 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
     await openStream();
     const shutdown = jest.spyOn(getTracerProvider(), 'shutdown');
 
-    const hooked = hook();
+    const hooked = hook('SIGTERM');
     await new Promise((resolve) => setTimeout(resolve, 20));
     // The app stops tracing while the hook waits for its stream: that stops the stream.
     await stopTracing();
@@ -195,8 +203,8 @@ describe("init()'s SIGTERM/SIGINT hook", () => {
   it('a second signal during the hook shares its shutdown', async () => {
     const shutdown = jest.spyOn(getTracerProvider(), 'shutdown');
 
-    const first = hook();
-    const second = hook();
+    const first = hook('SIGTERM');
+    const second = hook('SIGTERM');
     await first;
 
     expect(second).toBe(first);
